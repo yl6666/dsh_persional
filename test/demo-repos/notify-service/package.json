@@ -1,0 +1,9 @@
+{
+  "name": "@acme/notify-service",
+  "version": "0.3.1",
+  "type": "module",
+  "main": "src/handler.js",
+  "dependencies": {
+    "@acme/shared-sdk": "^1.2.0"
+  }
+}

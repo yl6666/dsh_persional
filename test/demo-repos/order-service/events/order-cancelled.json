@@ -1,0 +1,8 @@
+{
+  "name": "order.cancelled",
+  "version": 2,
+  "payload": {
+    "orderId": "string",
+    "reason": "string"
+  }
+}

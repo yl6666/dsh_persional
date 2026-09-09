@@ -1,18 +1,25 @@
-/**
+﻿/**
  * dsh-repo-board - multi-repo collaborative development plugin for the
  * DeepSeek Harness (docs/product-design.md).
  *
- * The pure domain core is exported from './core.ts'. This entry additionally
- * carries the Cordis plugin shape consumed by the DSH loader; host-side
- * service registration lands with M2 (design 8).
+ * The default export is the Cordis service plugin: instantiating it
+ * registers `ctx.repoBoard` (scan, graph persistence, queries, manual
+ * edits). The pure domain core stays importable from `dsh-repo-board/core`
+ * without any host dependencies.
  * @module dsh-repo-board
  */
-export * from './core.ts'
 
-export const name = 'repo-board'
-
-export function apply(): void {
-  // M2 (design 8): register ctx.repoGraph, the dispatch pipeline, and the
-  // model-facing tools here. Kept as a no-op until the cordis shell lands so
-  // the bundle row already loads cleanly.
-}
+export {
+  RepoGraphStore,
+  validateRepoGraphDocument,
+} from './graph/store.ts'
+export type {
+  AutoEdgeInput,
+  ManualEdgeInput,
+  MergeReport,
+} from './graph/store.ts'
+export type { RepoGraphDocument, RepoNode, RepoEdge, RepoEdgeType } from './graph/types.ts'
+export { edgeId } from './graph/types.ts'
+export { RepoBoardService } from './service.ts'
+export type { RepoRef } from './service.ts'
+export { default } from './service.ts'

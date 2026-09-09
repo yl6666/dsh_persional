@@ -1,0 +1,10 @@
+{
+  "name": "@acme/web-portal",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "src/app.js",
+  "dependencies": {
+    "@acme/order-service": "^0.1.0",
+    "@acme/shared-sdk": "^1.2.0"
+  }
+}

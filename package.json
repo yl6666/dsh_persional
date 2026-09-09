@@ -33,6 +33,7 @@
     "@deepseek-ai/cordis": ">=4.0.0"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },

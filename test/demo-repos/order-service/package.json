@@ -1,0 +1,9 @@
+{
+  "name": "@acme/order-service",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/server.js",
+  "dependencies": {
+    "@acme/shared-sdk": "^1.2.0"
+  }
+}
