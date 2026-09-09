@@ -1,9 +1,11 @@
 # Plugin rows contributed by the dsh-repo-board bundle (docs/product-design.md 14).
-# The host half registers the RepoGraph service and the dispatch pipeline's
-# model-facing tools (design 8). The browser half joins later through the
-# dsh.client manifest once the board UI ships (M5).
+# The host half registers the RepoGraph service, the dispatch pipeline's
+# model-facing tools (design 8), and the board's web routes (design 7). The
+# browser half joins through the dsh.client manifest (board tab + launcher).
 - insert:
     - id: repo-board-core
       name: dsh-repo-board
     - id: repo-board-tools
       name: dsh-repo-board/tools
+    - id: repo-board-web
+      name: dsh-repo-board/web
