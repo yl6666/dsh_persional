@@ -1,0 +1,96 @@
+﻿/**
+ * Prompt and schema builders for the one-session-per-repo executor binding
+ * (docs/product-design.md 6). Pure functions: fully unit-testable, no host
+ * imports.
+ * @module dsh-repo-board
+ */
+
+import type { JsonSchemaNode } from './types.ts'
+import type { RepoModificationPlan, RequirementSpec } from '../pipeline/types.ts'
+
+/** Structured output one repo session is asked to produce. */
+export interface RepoSessionOutput {
+  readonly summary: string
+  readonly commit?: string
+  readonly changedFiles: readonly string[]
+}
+
+/** Output schema sent with the subagent start request. */
+export const repoSessionOutputSchema: JsonSchemaNode & { type: 'object' } = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string', description: 'what was changed and why, one paragraph' },
+    commit: { type: 'string', description: 'the commit hash, when changes were committed' },
+    changedFiles: { type: 'array', items: { type: 'string' }, description: 'files created or modified' },
+  },
+  required: ['summary', 'changedFiles'],
+}
+
+function bulletList(items: readonly string[], empty: string): string {
+  return items.length === 0 ? '（' + empty + '）' : items.map(item => '- ' + item).join('\n')
+}
+
+/**
+ * The full brief one repo session receives: the repo's plan in context, the
+ * upstream results it may build on, and the reporting contract.
+ */
+export function buildRepoSessionPrompt(input: {
+  readonly plan: RepoModificationPlan
+  readonly spec: RequirementSpec
+  readonly repoPath?: string
+  readonly upstreamResults: readonly { repo: string; summary: string; commit?: string }[]
+}): string {
+  const { plan, spec, repoPath, upstreamResults } = input
+  const lines: string[] = []
+  lines.push('你是多仓协同开发中负责单仓修改的执行者（一会话一仓）。')
+  lines.push('')
+  lines.push('## 需求规格')
+  lines.push(spec.text)
+  lines.push('目标：')
+  lines.push(bulletList(spec.goals, '无子目标拆分'))
+  lines.push('约束：')
+  lines.push(bulletList(spec.constraints, '无额外约束'))
+  lines.push('验收标准：')
+  lines.push(bulletList(spec.acceptance, '未给出'))
+  lines.push('')
+  lines.push('## 你负责的仓库：' + plan.repo)
+  if (repoPath !== undefined) lines.push('本地路径：' + repoPath)
+  lines.push('改动摘要：' + plan.summary)
+  lines.push('改动点：')
+  lines.push(bulletList(plan.changes.map(change => change.target + ' - ' + change.description), '由你根据摘要自行确定'))
+  if (plan.writeScopes.length > 0) {
+    lines.push('建议写范围（提示性前缀，非硬限制）：' + plan.writeScopes.join(', '))
+  }
+  if (plan.contractImpact.breaking.length > 0) {
+    lines.push('注意：本仓计划包含破坏性契约变更，已被标记人审：')
+    lines.push(bulletList(plan.contractImpact.breaking, ''))
+  }
+  lines.push('本仓验收标准：')
+  lines.push(bulletList(plan.acceptance, '同全局验收标准'))
+  lines.push('')
+  if (upstreamResults.length > 0) {
+    lines.push('## 已完成的上游仓库（可作为前提）')
+    for (const upstream of upstreamResults) {
+      lines.push('- ' + upstream.repo + (upstream.commit !== undefined ? '（commit ' + upstream.commit + '）' : '') + '：' + upstream.summary)
+    }
+    lines.push('')
+  }
+  lines.push('## 要求')
+  lines.push('1. 只修改 ' + plan.repo + ' 仓库；不要动其他仓库。')
+  lines.push('2. 在仓库内完成修改后运行可用的测试或构建验证。')
+  lines.push('3. 用 git 提交你的修改（信息用 conventional commits 风格）。')
+  lines.push('4. 不要 push；由调度方统一决定推送。')
+  lines.push('5. 完成后按结构化输出报告：summary（改了什么）、commit（提交哈希）、changedFiles（改动文件列表）。')
+  lines.push('6. 如果无法完成（需求矛盾、缺少信息、上游未就绪），在 summary 中明确说明原因并停止，不要强行提交半成品。')
+  return lines.join('\n')
+}
+
+/** Render one line of human-facing run narration for a tool result. */
+export function renderRunLine(run: { perRepo: readonly { repo: string; state: string; commit?: string }[]; errors: readonly string[] }): string {
+  const rows = run.perRepo.map(entry => {
+    const commit = entry.commit !== undefined ? ' @ ' + entry.commit.slice(0, 7) : ''
+    return entry.repo + ': ' + entry.state + commit
+  })
+  const suffix = run.errors.length > 0 ? '\n问题：\n' + bulletList(run.errors, '') : ''
+  return rows.join('\n') + suffix
+}

@@ -32,6 +32,7 @@ import { scannedFingerprint, scanRepoDirectory } from './scan/fs.ts'
 import { executePlans } from './exec/executor.ts'
 import type { RepoTask } from './exec/executor.ts'
 import type { ExecutionRun } from './pipeline/types.ts'
+import type { DraftRequirement, RequirementDocument } from './pipeline/types.ts'
 import { RequirementRecord } from './pipeline/flow.ts'
 
 /** One repo reference for scanning: a stable key plus a local checkout path. */
@@ -49,11 +50,15 @@ declare module '@deepseek-ai/cordis' {
 /**
  * The active multi-repo board: one open RepoGraph per service instance.
  * Graph mutations persist to the file the graph was opened with; queries
- * always read detached immutable documents.
+ * always read detached immutable documents. The requirement registry (the
+ * artifact chain per dispatched requirement, 13.3) persists next to the
+ * graph file and reloads on open.
  */
 export class RepoBoardService extends Service {
   private store?: RepoGraphStore
   private graphPath?: string
+  private readonly requirements = new Map<string, RequirementRecord>()
+  private requirementSeq = 0
 
   constructor(ctx: Context) {
     super(ctx, 'repoBoard')
@@ -69,9 +74,43 @@ export class RepoBoardService extends Service {
     return this.requireStore().toDocument()
   }
 
+  /** Persisted requirement records, newest first. */
+  listRequirements(): RequirementDocument[] {
+    return [...this.requirements.values()].map(record => record.toDocument())
+  }
+
+  /** One requirement record by id, or undefined. */
+  getRequirement(id: string): RequirementRecord | undefined {
+    return this.requirements.get(id)
+  }
+
+  /**
+   * Register a new dispatched requirement (step input); assigns and persists
+   * the next `req-<n>` id.
+   */
+  async createRequirement(draft: DraftRequirement): Promise<{ id: string; record: RequirementRecord }> {
+    this.requireStore()
+    this.requirementSeq += 1
+    const id = 'req-' + this.requirementSeq
+    const record = RequirementRecord.create(id, draft)
+    this.requirements.set(id, record)
+    await this.persistRequirements()
+    return { id, record }
+  }
+
+  /** Replace one requirement record (transition results) and persist. */
+  async setRequirement(id: string, record: RequirementRecord): Promise<void> {
+    const current = this.requirements.get(id)
+    if (current === undefined) throw new Error('repo board: unknown requirement ' + id)
+    if (record.toDocument().id !== id) throw new Error('repo board: requirement id mismatch')
+    this.requirements.set(id, record)
+    await this.persistRequirements()
+  }
+
   /**
    * Open (or create) the graph document at `graphPath`. A missing file
    * creates an empty graph for `project`; an existing file must validate.
+   * Requirement records persist alongside and reload here.
    */
   async open(project: string, graphPath: string): Promise<RepoGraphDocument> {
     let raw: string
@@ -89,6 +128,7 @@ export class RepoBoardService extends Service {
     const parsed = JSON.parse(raw) as unknown
     this.store = RepoGraphStore.load(parsed as RepoGraphDocument)
     this.graphPath = graphPath
+    await this.loadRequirements()
     return this.document
   }
 
@@ -224,6 +264,46 @@ export class RepoBoardService extends Service {
       throw new Error('repo board: no graph is open - call open(project, graphPath) first')
     }
     return this.store
+  }
+
+  private requirementsPath(): string {
+    const graphPath = this.graphPath ?? 'graph.json'
+    const dir = dirname(graphPath)
+    const base = graphPath.split(/[\\/]/).pop() ?? 'graph.json'
+    return dir + '/' + base.replace(/\.json$/, '') + '.requirements.json'
+  }
+
+  private async persistRequirements(): Promise<void> {
+    if (this.graphPath === undefined) return
+    const path = this.requirementsPath()
+    await mkdir(dirname(path), { recursive: true })
+    const documents = this.listRequirements()
+    await writeFile(
+      path,
+      JSON.stringify({ version: 1, seq: this.requirementSeq, requirements: documents }, null, 2),
+      'utf8',
+    )
+  }
+
+  private async loadRequirements(): Promise<void> {
+    const path = this.requirementsPath()
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    const parsed = JSON.parse(raw) as { version?: unknown; seq?: unknown; requirements?: unknown }
+    if (parsed.version !== 1 || !Array.isArray(parsed.requirements)) {
+      throw new Error('repo board: malformed requirements file ' + path)
+    }
+    this.requirements.clear()
+    for (const document of parsed.requirements) {
+      const record = RequirementRecord.load(document as RequirementDocument)
+      this.requirements.set(record.toDocument().id, record)
+    }
+    this.requirementSeq = typeof parsed.seq === 'number' ? parsed.seq : this.requirements.size
   }
 
   private async persist(): Promise<void> {

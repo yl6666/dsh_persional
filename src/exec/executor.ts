@@ -17,8 +17,8 @@ import type { RepoModificationPlan, RepoRunRecord, RepoRunState, ExecutionRun } 
 /** What one repo task may report back. */
 export type RepoTaskOutcome =
   | { state: 'succeeded'; commit?: string; diffSummary?: string; sessionId?: string }
-  | { state: 'failed'; error: string }
-  | { state: 'needs-human'; reason: string }
+  | { state: 'failed'; error: string; sessionId?: string }
+  | { state: 'needs-human'; reason: string; sessionId?: string }
 
 /** Context handed to one repo task. */
 export interface RepoTaskContext {
