@@ -1,0 +1,49 @@
+{
+  "name": "dsh-repo-board",
+  "version": "0.1.0",
+  "description": "Multi-repo collaborative development plugin for DeepSeek Harness: RepoGraph relationship analysis, one-shot requirement dispatch, one-session-per-repo execution, and a graphical board UI",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./core": {
+      "types": "./lib/types/core.d.ts",
+      "default": "./lib/core.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/core.js",
+    "lib/graph/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yl6666/dsh_persional.git"
+  }
+}
