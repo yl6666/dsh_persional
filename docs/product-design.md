@@ -595,4 +595,23 @@ ExecutionRun {                   // [5]-[6] 运行态快照
 
 ---
 
+## 15. 实施状态（M0–M5 全部落地）
+
+| 里程碑 | 内容 | 验证 |
+|---|---|---|
+| M0 | 包骨架、TS 6 strict 基线、cordis 服务骨架 | tsc clean |
+| M1 | RepoGraph 数据模型、拓扑/影响面/SCC 算法、持久化、7 生态 manifest 提取、契约提取（openapi/proto/graphql/事件） | 61 tests |
+| M2 | 仓库目录扫描、`repoBoard` 服务（图生命周期 + 人工编辑合并策略） | 68 tests |
+| M3 | 需求管道 artifact 链 + RequirementRecord 状态机 + 影响分析/方案骨架/冲突评审 | 85 tests |
+| M4 | git 封装（porcelain/commit/push）+ Kahn 拓扑分批执行器（一会话一仓） | 99 tests |
+| M4.5 | DSH 宿主绑定：结构化类型（零运行时依赖）、七个模型工具、子代理会话任务 | 106 tests |
+| M5 | 看板 UI：纯函数布局视图模型、React SVG 关系编辑器、右栏标签页 + 停靠启动按钮、宿主 Web 路由、ModuleLoader 格式 client bundle | 120 tests |
+| 打包 | `pnpm pack` 42 文件（host lib + client.js + patch + README）；`prepare` 自包含构建链验证通过 | tarball 检查 |
+
+- 测试：`pnpm test` → 120/120（11 文件：领域核心 7 + 管道/执行器 + git + dsh 绑定 + 布局/组件/路由 3）。
+- 宿主能力全部**运行时探测**（`ctx.tools` / `ctx.subagents` / `ctx.webServer` / slots）：DSH 宿主齐全时全量注册，裸 cordis 环境降级为纯领域库（`exports["./core"]`）。
+- 待办（§12 决策点）：LLM 语义标注开关、git push 凭据策略、审批门控。
+
+---
+
 *本文档持续迭代：设计每敲定一层，就把对应的数据模型/算法/协议展开一层。*
