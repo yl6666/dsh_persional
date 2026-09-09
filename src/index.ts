@@ -44,4 +44,8 @@ export type {
 } from './pipeline/types.ts'
 export { RepoBoardService } from './service.ts'
 export type { RepoRef } from './service.ts'
+export { executePlans } from './exec/executor.ts'
+export type { RepoTask, RepoTaskContext, RepoTaskOutcome, ExecutePlansOptions } from './exec/executor.ts'
+export { GitClient, NodeCommandRunner } from './exec/git.ts'
+export type { CommandRunner, RunResult, GitStatus, GitIdentity } from './exec/git.ts'
 export { default } from './service.ts'

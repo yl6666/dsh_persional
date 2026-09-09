@@ -29,6 +29,10 @@ import {
 } from './extract/contract.ts'
 import type { ContractDeclaration } from './extract/contract.ts'
 import { scannedFingerprint, scanRepoDirectory } from './scan/fs.ts'
+import { executePlans } from './exec/executor.ts'
+import type { RepoTask } from './exec/executor.ts'
+import type { ExecutionRun } from './pipeline/types.ts'
+import { RequirementRecord } from './pipeline/flow.ts'
 
 /** One repo reference for scanning: a stable key plus a local checkout path. */
 export interface RepoRef {
@@ -188,6 +192,31 @@ export class RepoBoardService extends Service {
   /** Topological scheduling units, upstream first, cycles condensed (13.2). */
   topologicalUnits(repos?: readonly string[], options?: TraversalOptions): TopologicalUnit[] {
     return topologicalUnits(this.document, repos, options)
+  }
+
+  /**
+   * Steps [5]-[6]: execute a planned requirement's repo tasks upstream first
+   * (design 6). Repo checkout paths come from the graph nodes; the injected
+   * task runs once per plan (one DSH session per repo in production). Returns
+   * the dispatched record with the execution run attached.
+   */
+  async dispatchRequirement(
+    record: RequirementRecord,
+    task: RepoTask,
+    options: { concurrency?: number } = {},
+  ): Promise<{ record: RequirementRecord; run: ExecutionRun }> {
+    if (record.status !== 'planned') {
+      throw new Error('repo board: only planned requirements can be dispatched')
+    }
+    const plans = record.toDocument().plans
+    if (plans === undefined) throw new Error('repo board: planned requirement carries no plans')
+    const repoPaths: Record<string, string> = {}
+    for (const key of Object.keys(this.document.nodes)) {
+      const path = this.document.nodes[key]?.path
+      if (path !== undefined) repoPaths[key] = path
+    }
+    const run = await executePlans(plans, task, { repoPaths, concurrency: options.concurrency })
+    return { record: record.dispatch(run), run }
   }
 
   private requireStore(): RepoGraphStore {

@@ -24,6 +24,7 @@ import type {
   ClarificationSession,
   CriticalEdge,
   DraftRequirement,
+  ExecutionRun,
   ExecutionUnit,
   ImpactAnalysis,
   RepoModificationPlan,
@@ -326,11 +327,11 @@ export class RequirementRecord {
     return new RequirementRecord({ ...this.doc, status: 'planned', plans })
   }
 
-  /** [5] Mark dispatched (the execution run attaches in the executor). */
-  dispatch(): RequirementRecord {
+  /** [5] Mark dispatched, optionally attaching the finished execution run. */
+  dispatch(run?: ExecutionRun): RequirementRecord {
     if (this.doc.status !== 'planned') {
       throw new TypeError('only planned requirements can be dispatched')
     }
-    return new RequirementRecord({ ...this.doc, status: 'dispatched' })
+    return new RequirementRecord({ ...this.doc, status: 'dispatched', run })
   }
 }
