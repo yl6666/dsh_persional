@@ -36,7 +36,7 @@ describe('hostCapabilities probe', () => {
     expect(bare.subagents).toBeUndefined()
     const fake = hostCapabilities({
       tools: { register: () => () => {} },
-      subagents: { start: async () => ({ id: 'x', result: Promise.resolve({ output: [], stopReason: 'end' }) }) },
+      subagents: { start: async () => ({ id: 'x', result: Promise.resolve({ output: [], stopReason: 'completed' }) }) },
     })
     expect(fake.tools).toBeDefined()
     expect(fake.subagents).toBeDefined()
@@ -79,8 +79,12 @@ describe('buildRepoSessionPrompt', () => {
 describe('buildRepoSessionTask with a fake subagent runtime', () => {
   it('maps structured output to a succeeded outcome and feeds upstream', async () => {
     const started: string[] = []
+    const parents: object[] = []
+    const providers: string[] = []
     const subagents: SubagentsRuntimeLike = {
-      async start(request) {
+      async start(provider, request) {
+        providers.push(provider)
+        parents.push(request.parent)
         const label = request.label ?? ''
         started.push(label)
         return {
@@ -92,11 +96,12 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
               commit: 'deadbeef' + started.length,
               changedFiles: ['src/x.ts'],
             },
-            stopReason: 'end_turn',
+            stopReason: 'completed',
           }),
         }
       },
     }
+    const fakeParent = { kind: 'fake-agent' }
     const spec: RequirementSpec = {
       text: 't',
       goals: [],
@@ -114,7 +119,7 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
     }
     const task = buildRepoSessionTask({
       subagents,
-      parent: { kind: 'fake-agent' },
+      parent: fakeParent,
       spec,
       upstream: { results: [] },
       signal: new AbortController().signal,
@@ -129,6 +134,9 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
     const outcomeB = await task({ plan: planB, repoPath: 'D:/b', branch: 'ai-delivery/req-1/b', attempt: 1, previousErrors: [] })
     expect(outcomeB).toMatchObject({ state: 'succeeded', commit: 'deadbeef2' })
     expect(started).toEqual(['repo-board/a', 'repo-board/b'])
+    // Real-host contract: provider name first, parent agent forwarded.
+    expect(providers).toEqual(['spawn', 'spawn'])
+    expect(parents).toEqual([fakeParent, fakeParent])
   })
 
   it('a session without structured output fails with its text', async () => {
@@ -139,7 +147,7 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
           result: Promise.resolve({
             output: [{ type: 'text', text: '需求矛盾，无法继续' }],
             structured: undefined,
-            stopReason: 'end_turn',
+            stopReason: 'completed',
           }),
         }
       },
@@ -158,7 +166,7 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
     expect(outcome).toEqual({
       state: 'failed',
       sessionId: 'sess-x',
-      error: 'repo session ended without structured output (stopReason: end_turn): 需求矛盾，无法继续',
+      error: 'repo session ended without structured output (stopReason: completed): 需求矛盾，无法继续',
     })
   })
 })
@@ -189,14 +197,14 @@ describe('tools plugin end-to-end over demo repos', () => {
     ;(ctx as unknown as { tools: unknown }).tools = registry
     const subagentCalls: string[] = []
     ;(ctx as unknown as { subagents: unknown }).subagents = {
-      async start(request: { label?: string }) {
+      async start(_provider: string, request: { label?: string }) {
         subagentCalls.push(request.label ?? '')
         return {
           id: 'sess-' + subagentCalls.length,
           result: Promise.resolve({
             output: [{ type: 'text', text: 'ok' }],
             structured: { summary: 'done ' + (request.label ?? ''), commit: 'c' + subagentCalls.length, changedFiles: ['src/main.ts'] },
-            stopReason: 'end_turn',
+            stopReason: 'completed',
           }),
         }
       },
@@ -359,7 +367,7 @@ describe('tools plugin end-to-end over demo repos', () => {
     const registry = fakeRegistry()
     ;(ctx as unknown as { tools: unknown }).tools = registry
     ;(ctx as unknown as { subagents: unknown }).subagents = {
-      async start(request: { prompt: { type: string; text?: string }[] }) {
+      async start(_provider: string, request: { prompt: { type: string; text?: string }[] }) {
         const prompt = request.prompt.map(block => block.type === 'text' ? (block.text ?? '') : '').join('\n')
         const pathMatch = /本地路径：(.+)/.exec(prompt)
         expect(pathMatch).not.toBeNull()
@@ -372,7 +380,7 @@ describe('tools plugin end-to-end over demo repos', () => {
           result: Promise.resolve({
             output: [{ type: 'text', text: 'done' }],
             structured: { summary: '新增 reason 支持', changedFiles: ['src/feature.ts'] },
-            stopReason: 'end_turn',
+            stopReason: 'completed',
           }),
         }
       },

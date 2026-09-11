@@ -19,6 +19,9 @@ export interface UpstreamResult {
 /** Options for {@link buildRepoSessionTask}. */
 export interface RepoSessionTaskOptions {
     readonly subagents: SubagentsRuntimeLike;
+    /** Subagent provider name; the web host ships 'spawn' and 'fork'. */
+    readonly provider?: string;
+    /** The delegating parent Agent (exec.agent of the calling tool). */
     readonly parent: object;
     readonly spec: RequirementSpec;
     /** Collects finished upstream results so later repos can build on them. */

@@ -11,7 +11,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 /** Cordis plugin name. */
 export declare const name = "repo-board-web";
-/** The board service must be live before routes register. */
+/**
+ * The board service must be live before routes register, and the host web
+ * server is required - inject declares both, so apply runs only when
+ * ctx.webServer exists (on hosts without one the plugin never applies).
+ */
 export declare const inject: string[];
 interface IncomingMessageLike {
     readonly method?: string;

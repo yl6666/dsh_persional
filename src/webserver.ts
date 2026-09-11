@@ -15,8 +15,12 @@ import type { RepoEdgeType } from './graph/types.ts'
 
 /** Cordis plugin name. */
 export const name = 'repo-board-web'
-/** The board service must be live before routes register. */
-export const inject = ['repoBoard']
+/**
+ * The board service must be live before routes register, and the host web
+ * server is required - inject declares both, so apply runs only when
+ * ctx.webServer exists (on hosts without one the plugin never applies).
+ */
+export const inject = ['repoBoard', 'webServer']
 
 interface IncomingMessageLike {
   readonly method?: string

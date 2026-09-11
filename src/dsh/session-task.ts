@@ -11,6 +11,7 @@
 import type { RepoTask, RepoTaskOutcome } from '../exec/executor.ts'
 import type { RepoModificationPlan, RequirementSpec } from '../pipeline/types.ts'
 import type { ContentBlock, SubagentsRuntimeLike } from './types.ts'
+import { DEFAULT_SUBAGENT_PROVIDER } from './types.ts'
 import { buildRepoSessionPrompt, repoSessionOutputSchema } from './prompt.ts'
 import type { RepoSessionOutput } from './prompt.ts'
 
@@ -24,6 +25,9 @@ export interface UpstreamResult {
 /** Options for {@link buildRepoSessionTask}. */
 export interface RepoSessionTaskOptions {
   readonly subagents: SubagentsRuntimeLike
+  /** Subagent provider name; the web host ships 'spawn' and 'fork'. */
+  readonly provider?: string
+  /** The delegating parent Agent (exec.agent of the calling tool). */
   readonly parent: object
   readonly spec: RequirementSpec
   /** Collects finished upstream results so later repos can build on them. */
@@ -59,7 +63,7 @@ export function buildRepoSessionTask(options: RepoSessionTaskOptions): RepoTask 
       selfCommit: options.selfCommit,
       upstreamResults: options.upstream.results.filter(result => plan.prerequisites.includes(result.repo)),
     })
-    const run = await options.subagents.start({
+    const run = await options.subagents.start(options.provider ?? DEFAULT_SUBAGENT_PROVIDER, {
       label: 'repo-board/' + plan.repo,
       prompt: [{ type: 'text', text: prompt }] satisfies ContentBlock[],
       parent: options.parent,
@@ -83,10 +87,12 @@ export function buildRepoSessionTask(options: RepoSessionTaskOptions): RepoTask 
       .map(block => block.text)
       .join('\n')
       .trim()
+    const diagnostic = result.diagnostic === undefined ? '' : ' Diagnostic: ' + result.diagnostic
     return {
       state: 'failed',
       sessionId,
-      error: 'repo session ended without structured output (stopReason: ' + result.stopReason + ')' + (text === '' ? '' : ': ' + text.slice(0, 500)),
+      error: 'repo session ended without structured output (stopReason: ' + result.stopReason + ')' +
+        diagnostic + (text === '' ? '' : ': ' + text.slice(0, 500)),
     }
   }
 }

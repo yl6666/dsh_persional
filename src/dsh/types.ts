@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Structural types for the DSH host surface this plugin consumes
  * (docs/product-design.md 8).
  *
@@ -71,17 +71,21 @@ export interface SubagentRunLike {
   readonly result: Promise<SubagentResultLike>
 }
 
-/** The structured outcome of one subagent run. */
+/** The structured outcome of one subagent run (SubagentResult). */
 export interface SubagentResultLike {
   readonly output: readonly ContentBlock[]
   readonly structured?: unknown
+  /** 'completed' | 'aborted' | 'error' | 'max-tokens' | 'refusal' (extensible). */
   readonly stopReason: string
+  /** Provider-authored failure detail, present on abnormal endings. */
+  readonly diagnostic?: string
 }
 
 /** One-shot subagent start request (subagent.md SubagentStartRequest). */
 export interface SubagentStartRequestLike {
   readonly label?: string
   readonly prompt: readonly ContentBlock[]
+  /** The delegating parent Agent (exec.agent of the calling tool). */
   readonly parent: object
   readonly signal: AbortSignal
   readonly outputSchema?: JsonSchemaNode
@@ -89,26 +93,47 @@ export interface SubagentStartRequestLike {
 
 /** The host's subagent runtime, when present. */
 export interface SubagentsRuntimeLike {
-  start(request: SubagentStartRequestLike): Promise<SubagentRunLike>
+  start(provider: string, request: SubagentStartRequestLike): Promise<SubagentRunLike>
 }
+
+/** Default in-process subagent provider on the web host (spawn/fork). */
+export const DEFAULT_SUBAGENT_PROVIDER = 'spawn'
 
 /**
  * Runtime host capability probe: which optional DSH services exist on this
- * context. Plain cordis hosts report none.
+ * context. Real cordis contexts are service proxies - an undeclared inject
+ * property read throws, so probe through `ctx.get(name)` (the official
+ * optional accessor) first and fall back to a plain property for fake hosts.
  */
 export interface HostCapabilities {
   readonly tools: ToolsRegistryLike | undefined
   readonly subagents: SubagentsRuntimeLike | undefined
 }
 
-/** Read the optional host services off a plain cordis Context. */
+/** Read one optional host service: ctx.get first, plain property second. */
+function readService(ctx: object, name: 'tools' | 'subagents'): unknown {
+  const holder = ctx as { get?: (name: string) => unknown; tools?: unknown; subagents?: unknown }
+  if (typeof holder.get === 'function') {
+    try {
+      const viaGet = holder.get(name)
+      if (viaGet !== undefined) return viaGet
+    } catch {
+      // Not provided (or not yet) - fall through to the property probe.
+    }
+  }
+  return holder[name]
+}
+
+/** Read the optional host services off any cordis-like context. */
 export function hostCapabilities(ctx: object): HostCapabilities {
-  const holder = ctx as { tools?: unknown; subagents?: unknown }
-  const tools = typeof holder.tools === 'object' && holder.tools !== null && 'register' in holder.tools
-    ? (holder.tools as ToolsRegistryLike)
-    : undefined
-  const subagents = typeof holder.subagents === 'object' && holder.subagents !== null && 'start' in holder.subagents
-    ? (holder.subagents as SubagentsRuntimeLike)
-    : undefined
-  return { tools, subagents }
+  const tools = readService(ctx, 'tools')
+  const subagents = readService(ctx, 'subagents')
+  return {
+    tools: typeof tools === 'object' && tools !== null && 'register' in tools
+      ? (tools as ToolsRegistryLike)
+      : undefined,
+    subagents: typeof subagents === 'object' && subagents !== null && 'start' in subagents
+      ? (subagents as SubagentsRuntimeLike)
+      : undefined,
+  }
 }

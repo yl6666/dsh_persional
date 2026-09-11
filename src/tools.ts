@@ -21,7 +21,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { hostCapabilities } from './dsh/types.ts'
-import type { ContentBlock, RawToolDefinition } from './dsh/types.ts'
+import type { ContentBlock, RawToolDefinition, ToolsRegistryLike } from './dsh/types.ts'
 import type { RepoGraphDocument } from './graph/types.ts'
 import { buildRepoSessionTask } from './dsh/session-task.ts'
 import { renderRunLine } from './dsh/prompt.ts'
@@ -36,8 +36,12 @@ import type { RepoBoardService } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'repo-board-tools'
-/** The board service must be live before tools register. */
-export const inject = ['repoBoard']
+/**
+ * The board service must be live before tools register, and the host's tool
+ * registry is required - inject declares it, so apply runs only when
+ * ctx.tools exists (real cordis throws on undeclared service reads).
+ */
+export const inject = ['repoBoard', 'tools']
 
 function fail(what: string): never {
   throw new Error('repo board: ' + what)
@@ -165,7 +169,9 @@ function summarizeGraph(document: RepoGraphDocument): unknown {
 
 /** Register the model-facing tools when the host provides a registry. */
 export function apply(ctx: Context): void {
-  const { tools } = hostCapabilities(ctx)
+  // Direct property read: legal here because 'tools' is declared in inject
+  // (plain-property fallback keeps direct-apply unit tests working).
+  const tools = (ctx as { tools?: ToolsRegistryLike }).tools
   if (tools === undefined) return
   tools.register(scanTool(ctx))
   tools.register(graphTool(ctx))
@@ -543,6 +549,8 @@ function executeTool(ctx: Context): RawToolDefinition {
       if (record === undefined) fail('unknown requirement ' + id)
       const document = record.toDocument()
       if (document.spec === undefined) fail('requirement has no spec')
+      // Probe the subagent service at execute time (optional host service:
+      // ctx.get never throws on real cordis, unlike undeclared property reads).
       const { subagents } = hostCapabilities(ctx)
       if (subagents === undefined) fail('this host provides no subagent runtime - cannot execute one-session-per-repo')
       if (exec.agent === undefined) fail('no calling agent - cannot parent repo sessions')

@@ -21,7 +21,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 /** Cordis plugin name. */
 export declare const name = "repo-board-tools";
-/** The board service must be live before tools register. */
+/**
+ * The board service must be live before tools register, and the host's tool
+ * registry is required - inject declares it, so apply runs only when
+ * ctx.tools exists (real cordis throws on undeclared service reads).
+ */
 export declare const inject: string[];
 /** Register the model-facing tools when the host provides a registry. */
 export declare function apply(ctx: Context): void;
