@@ -17,18 +17,15 @@ repo_board_plans    生成每仓一份 RepoModificationPlan + 评审发现 + 执
 repo_board_execute  按拓扑分批、每仓一个一次性子代理会话执行（一会话一仓），汇总结果
 ```
 
-七个模型工具 + 一个图形化看板，覆盖《[docs/product-design.md](docs/product-design.md)》§8 的八个下发步骤。
+七个模型工具 + 一个人工提交确认工具 + 一个图形化看板，覆盖《[docs/product-design.md](docs/product-design.md)》§8 的八个下发步骤。
 
 ## 安装
 
 ```bash
-# npm（推荐，一条命令）
-dsh plugin add dsh-repo-board
-
-# GitHub（源码安装，prepare 自包含构建）
+# GitHub（构建产物 lib/ 已提交，安装零构建）
 dsh plugin add github:yl6666/dsh_persional
 
-# 内网/离线 tarball
+# 内网/离线 tarball（pnpm pack 产物）
 dsh plugin add ./dsh-repo-board-0.1.0.tgz
 ```
 
