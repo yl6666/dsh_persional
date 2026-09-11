@@ -30,7 +30,7 @@ import {
 import type { ContractDeclaration } from './extract/contract.ts'
 import { scannedFingerprint, scanRepoDirectory } from './scan/fs.ts'
 import { executePlans } from './exec/executor.ts'
-import type { RepoTask } from './exec/executor.ts'
+import type { RepoGitGateway, RepoTask } from './exec/executor.ts'
 import type { ExecutionRun } from './pipeline/types.ts'
 import type { DraftRequirement, RequirementDocument } from './pipeline/types.ts'
 import { RequirementRecord } from './pipeline/flow.ts'
@@ -59,6 +59,10 @@ export class RepoBoardService extends Service {
   private graphPath?: string
   private readonly requirements = new Map<string, RequirementRecord>()
   private requirementSeq = 0
+  /** Repos with a dispatch in flight (6.1 single-pipeline-per-repo mutex). */
+  private readonly activeRepos = new Set<string>()
+  /** Git gateway from the latest dispatch, used by the submit gate (16.1). */
+  private lastGit?: RepoGitGateway
 
   constructor(ctx: Context) {
     super(ctx, 'repoBoard')
@@ -105,6 +109,11 @@ export class RepoBoardService extends Service {
     if (record.toDocument().id !== id) throw new Error('repo board: requirement id mismatch')
     this.requirements.set(id, record)
     await this.persistRequirements()
+  }
+
+  /** Replace a record via its own id (submit decisions); persists. */
+  private async replaceRequirement(record: RequirementRecord): Promise<void> {
+    await this.setRequirement(record.toDocument().id, record)
   }
 
   /**
@@ -237,13 +246,19 @@ export class RepoBoardService extends Service {
   /**
    * Steps [5]-[6]: execute a planned requirement's repo tasks upstream first
    * (design 6). Repo checkout paths come from the graph nodes; the injected
-   * task runs once per plan (one DSH session per repo in production). Returns
-   * the dispatched record with the execution run attached.
+   * task runs once per plan (one DSH session per repo in production).
+   * Manual commit policy stops each repo at a submit request (16.1); the
+   * same requirement's repos may not overlap another running dispatch (6.1).
    */
   async dispatchRequirement(
     record: RequirementRecord,
     task: RepoTask,
-    options: { concurrency?: number } = {},
+    options: {
+      concurrency?: number
+      git?: RepoGitGateway
+      commitPolicy?: 'auto' | 'manual'
+      maxAttempts?: number
+    } = {},
   ): Promise<{ record: RequirementRecord; run: ExecutionRun }> {
     if (record.status !== 'planned') {
       throw new Error('repo board: only planned requirements can be dispatched')
@@ -255,8 +270,92 @@ export class RepoBoardService extends Service {
       const path = this.document.nodes[key]?.path
       if (path !== undefined) repoPaths[key] = path
     }
-    const run = await executePlans(plans, task, { repoPaths, concurrency: options.concurrency })
-    return { record: record.dispatch(run), run }
+    // Per-repo mutex (6.1): one pipeline per repo at a time.
+    const repos = plans.map(plan => plan.repo)
+    const conflicts = repos.filter(repo => this.activeRepos.has(repo))
+    if (conflicts.length > 0) {
+      throw new Error('repo board: these repos already have a running dispatch: ' + conflicts.sort().join(', '))
+    }
+    for (const repo of repos) this.activeRepos.add(repo)
+    try {
+      const run = await executePlans(plans, task, {
+        repoPaths,
+        concurrency: options.concurrency,
+        git: options.git,
+        commitPolicy: options.commitPolicy,
+        maxAttempts: options.maxAttempts,
+        branchBase: 'ai-delivery/' + record.toDocument().id,
+      })
+      this.lastGit = options.git
+      return { record: record.dispatch(run), run }
+    } finally {
+      for (const repo of repos) this.activeRepos.delete(repo)
+    }
+  }
+
+  /**
+   * Human submit gate (16.1): approve one repo's pending submit request by
+   * committing its changes host-side on the requirement branch. Requires the
+   * git gateway from the dispatch that created the pending state.
+   */
+  async approveSubmit(
+    record: RequirementRecord,
+    repo: string,
+    options: { message?: string } = {},
+  ): Promise<RequirementRecord> {
+    const run = record.toDocument().run
+    if (record.status !== 'dispatched' || run === undefined) {
+      throw new Error('repo board: only a dispatched requirement can be submitted')
+    }
+    const entry = run.perRepo.find(item => item.repo === repo)
+    if (entry === undefined) throw new Error('repo board: no run entry for repo ' + repo)
+    if (entry.state !== 'submit-pending' || entry.submitRequest === undefined) {
+      throw new Error('repo board: repo ' + repo + ' is not waiting for a submit decision (state: ' + entry.state + ')')
+    }
+    if (this.lastGit === undefined) {
+      throw new Error('repo board: no git gateway from the dispatch - cannot commit')
+    }
+    const repoPath = this.document.nodes[repo]?.path
+    if (repoPath === undefined) throw new Error('repo board: repo ' + repo + ' has no checkout path in the graph')
+    const commit = await this.lastGit.commitAll(
+      repoPath,
+      options.message ?? 'ai(' + repo + '): ' + entry.submitRequest.summary,
+    )
+    const nextRun: ExecutionRun = {
+      perRepo: run.perRepo.map(item =>
+        item.repo === repo ? { ...item, state: 'submitted' as const, commit } : item,
+      ),
+      errors: run.errors.filter(error => !error.startsWith(repo + ':')),
+    }
+    const next = record.updateRun(nextRun)
+    await this.replaceRequirement(next)
+    return next
+  }
+
+  /**
+   * Reject one repo's pending submit request (16.1): the repo lands in
+   * needs-human with the rejection recorded, and no commit is made.
+   */
+  async rejectSubmit(record: RequirementRecord, repo: string, reason?: string): Promise<RequirementRecord> {
+    const run = record.toDocument().run
+    if (record.status !== 'dispatched' || run === undefined) {
+      throw new Error('repo board: only a dispatched requirement can be rejected')
+    }
+    const entry = run.perRepo.find(item => item.repo === repo)
+    if (entry === undefined) throw new Error('repo board: no run entry for repo ' + repo)
+    if (entry.state !== 'submit-pending') {
+      throw new Error('repo board: repo ' + repo + ' is not waiting for a submit decision (state: ' + entry.state + ')')
+    }
+    const rejection = 'submit rejected for ' + repo + (reason === undefined || reason === '' ? '' : ': ' + reason)
+    const nextRun: ExecutionRun = {
+      perRepo: run.perRepo.map(item =>
+        item.repo === repo ? { ...item, state: 'needs-human' as const } : item,
+      ),
+      errors: [...run.errors.filter(error => !error.startsWith(repo + ':')), rejection],
+    }
+    const next = record.updateRun(nextRun)
+    await this.replaceRequirement(next)
+    return next
   }
 
   private requireStore(): RepoGraphStore {

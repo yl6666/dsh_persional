@@ -1,4 +1,4 @@
-﻿/**
+/**
  * The RepoTask binding that runs one DSH subagent session per repo
  * (docs/product-design.md 6, 12 - subagents first).
  *
@@ -29,6 +29,8 @@ export interface RepoSessionTaskOptions {
   /** Collects finished upstream results so later repos can build on them. */
   readonly upstream: { results: UpstreamResult[] }
   readonly signal: AbortSignal
+  /** False when the host commits after human approval; the session must not commit. */
+  readonly selfCommit?: boolean
 }
 
 function isRepoSessionOutput(value: unknown): value is RepoSessionOutput {
@@ -46,11 +48,15 @@ function isRepoSessionOutput(value: unknown): value is RepoSessionOutput {
  * later prompts through the shared collector.
  */
 export function buildRepoSessionTask(options: RepoSessionTaskOptions): RepoTask {
-  return async ({ plan, repoPath }): Promise<RepoTaskOutcome> => {
+  return async ({ plan, repoPath, branch, attempt, previousErrors }): Promise<RepoTaskOutcome> => {
     const prompt = buildRepoSessionPrompt({
       plan,
       spec: options.spec,
       repoPath,
+      branch,
+      attempt,
+      previousErrors,
+      selfCommit: options.selfCommit,
       upstreamResults: options.upstream.results.filter(result => plan.prerequisites.includes(result.repo)),
     })
     const run = await options.subagents.start({

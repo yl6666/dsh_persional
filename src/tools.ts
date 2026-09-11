@@ -15,6 +15,7 @@
  * - repo_board_spec: attach the spec, analyze, scaffold plans ([0]-[3])
  * - repo_board_plans: attach filled plans + review findings ([3]-[4])
  * - repo_board_execute: one subagent session per repo, upstream first ([5]-[6])
+ * - repo_board_submit: human submit gate for manual commit policy (16.1)
  * @module dsh-repo-board/tools
  */
 
@@ -25,6 +26,7 @@ import type { RepoGraphDocument } from './graph/types.ts'
 import { buildRepoSessionTask } from './dsh/session-task.ts'
 import { renderRunLine } from './dsh/prompt.ts'
 import { reviewFindings, scaffoldPlans } from './pipeline/flow.ts'
+import { GitClient, NodeCommandRunner } from './exec/git.ts'
 import type {
   ClarificationQuestion,
   RepoModificationPlan,
@@ -172,6 +174,7 @@ export function apply(ctx: Context): void {
   tools.register(specTool(ctx))
   tools.register(plansTool(ctx))
   tools.register(executeTool(ctx))
+  tools.register(submitTool(ctx))
 }
 
 function scanTool(ctx: Context): RawToolDefinition {
@@ -513,12 +516,16 @@ function executeTool(ctx: Context): RawToolDefinition {
     name: 'repo_board_execute',
     description:
       '执行已挂载方案的多仓修改（[5]-[6]）：按依赖顺序（上游先行）为每个仓库启动一个独立子代理会话，' +
-      '会话在对应仓库内完成修改并提交。失败会阻断下游仓。返回每个仓的执行状态。',
+      '会话在对应仓库内完成修改。commitPolicy=auto（默认）时会话自行提交；manual 时调度方先切需求分支' +
+      '（ai-delivery/<需求id>/<仓>），会话只改不提交，改完停在 submit-pending 等人工确认（用 repo_board_submit）。' +
+      '失败仓可按 maxAttempts 重试（带失败历史重新执行），仍失败则阻断下游仓。返回每个仓的执行状态。',
     parameters: {
       type: 'object',
       properties: {
         requirementId: { type: 'string', description: '需求 id' },
         concurrency: { type: 'integer', description: '同批次并行上限（默认整批并行）' },
+        commitPolicy: { type: 'string', description: 'auto=会话自行提交（默认）；manual=人工确认后才提交', enum: ['auto', 'manual'] },
+        maxAttempts: { type: 'integer', description: '每仓最大尝试次数（默认 1；重试会带上失败历史）' },
       },
       required: ['requirementId'],
       additionalProperties: false,
@@ -529,6 +536,8 @@ function executeTool(ctx: Context): RawToolDefinition {
       const input = asObject(args, 'arguments')
       const id = asString(input['requirementId'], 'requirementId')
       const concurrency = input['concurrency'] === undefined ? undefined : Number(input['concurrency'])
+      const commitPolicy = input['commitPolicy'] === 'manual' ? 'manual' as const : 'auto' as const
+      const maxAttempts = input['maxAttempts'] === undefined ? undefined : Math.max(1, Number(input['maxAttempts']))
       const board = (ctx as { repoBoard: RepoBoardService }).repoBoard
       const record = board.getRequirement(id)
       if (record === undefined) fail('unknown requirement ' + id)
@@ -543,14 +552,70 @@ function executeTool(ctx: Context): RawToolDefinition {
         spec: document.spec,
         upstream: { results: [] },
         signal: exec.signal,
+        selfCommit: commitPolicy === 'auto',
       })
-      const { record: dispatched, run } = await board.dispatchRequirement(record, task, { concurrency })
+      const git = commitPolicy === 'manual' ? new GitClient(new NodeCommandRunner()) : undefined
+      const { record: dispatched, run } = await board.dispatchRequirement(record, task, {
+        concurrency,
+        git,
+        commitPolicy,
+        maxAttempts,
+      })
       await board.setRequirement(id, dispatched)
+      const pending = run.perRepo.filter(entry => entry.state === 'submit-pending')
       return {
         requirementId: id,
         status: dispatched.status,
         run,
         narration: renderRunLine(run),
+        next: pending.length > 0
+          ? '有仓停在 submit-pending：' + pending.map(entry => entry.repo).join(', ') + '。请向用户展示改动清单，确认后调用 repo_board_submit（approve），拒绝则 decision=reject。'
+          : undefined,
+      }
+    },
+  }
+}
+
+function submitTool(ctx: Context): RawToolDefinition {
+  return {
+    name: 'repo_board_submit',
+    description:
+      '人工提交确认（提交门控）：对停在 submit-pending 的仓做放行或拒绝。approve=调度方在需求分支上提交该仓改动' +
+      '（状态变 submitted，返回 commit）；reject=不提交、状态变 needs-human 并记录原因。只有 submit-pending 的仓可操作。',
+    parameters: {
+      type: 'object',
+      properties: {
+        requirementId: { type: 'string', description: '需求 id' },
+        repo: { type: 'string', description: '仓库名' },
+        decision: { type: 'string', description: 'approve=确认提交；reject=拒绝提交', enum: ['approve', 'reject'] },
+        message: { type: 'string', description: 'approve 时的提交信息（可选，默认用方案摘要）；reject 时的拒绝原因' },
+      },
+      required: ['requirementId', 'repo', 'decision'],
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object' }, render: textRender },
+    async execute(args) {
+      const input = asObject(args, 'arguments')
+      const id = asString(input['requirementId'], 'requirementId')
+      const repo = asString(input['repo'], 'repo')
+      const decision = asString(input['decision'], 'decision')
+      if (decision !== 'approve' && decision !== 'reject') fail('decision must be approve or reject')
+      const message = typeof input['message'] === 'string' && input['message'] !== '' ? input['message'] : undefined
+      const board = (ctx as { repoBoard: RepoBoardService }).repoBoard
+      const record = board.getRequirement(id)
+      if (record === undefined) fail('unknown requirement ' + id)
+      const next = decision === 'approve'
+        ? await board.approveSubmit(record, repo, { message })
+        : await board.rejectSubmit(record, repo, message)
+      const run = next.toDocument().run!
+      const entry = run.perRepo.find(item => item.repo === repo)!
+      return {
+        requirementId: id,
+        repo,
+        decision,
+        state: entry.state,
+        commit: entry.commit,
+        run,
       }
     },
   }

@@ -119,14 +119,14 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
       upstream: { results: [] },
       signal: new AbortController().signal,
     })
-    const outcomeA = await task({ plan: planA, repoPath: 'D:/a' })
+    const outcomeA = await task({ plan: planA, repoPath: 'D:/a', branch: 'ai-delivery/req-1/a', attempt: 1, previousErrors: [] })
     expect(outcomeA).toEqual({
       state: 'succeeded',
       sessionId: 'sess-1',
       commit: 'deadbeef1',
       diffSummary: 'src/x.ts',
     })
-    const outcomeB = await task({ plan: planB, repoPath: 'D:/b' })
+    const outcomeB = await task({ plan: planB, repoPath: 'D:/b', branch: 'ai-delivery/req-1/b', attempt: 1, previousErrors: [] })
     expect(outcomeB).toMatchObject({ state: 'succeeded', commit: 'deadbeef2' })
     expect(started).toEqual(['repo-board/a', 'repo-board/b'])
   })
@@ -154,7 +154,7 @@ describe('buildRepoSessionTask with a fake subagent runtime', () => {
     const outcome = await task({ plan: {
       repo: 'a', summary: 's', changes: [], writeScopes: [],
       contractImpact: { breaking: [], downstream: [] }, prerequisites: [], acceptance: [],
-    } })
+    }, branch: '', attempt: 1, previousErrors: [] })
     expect(outcome).toEqual({
       state: 'failed',
       sessionId: 'sess-x',
@@ -205,7 +205,7 @@ describe('tools plugin end-to-end over demo repos', () => {
     return { ctx, registry, subagentCalls }
   }
 
-  it('registers all seven tools on a capable host and none on a bare one', async () => {
+  it('registers all eight tools on a capable host and none on a bare one', async () => {
     const { ctx, registry } = await setup()
     expect([...registry.definitions.keys()].sort()).toEqual([
       'repo_board_clarify',
@@ -215,6 +215,7 @@ describe('tools plugin end-to-end over demo repos', () => {
       'repo_board_plans',
       'repo_board_scan',
       'repo_board_spec',
+      'repo_board_submit',
     ])
     const bareCtx = new Context()
     toolsPlugin.apply(bareCtx)
@@ -339,5 +340,101 @@ describe('tools plugin end-to-end over demo repos', () => {
     const graphTool = registry.definitions.get('repo_board_graph')!
     await expect(graphTool.execute({ action: 'impact' }, toolExec({}))).rejects.toThrow(/repo/)
     void ctx
+  })
+
+  it('manual commit policy: requirement branch, submit gate, and host-side commit end to end', async () => {
+    // One real git checkout the fake session actually edits.
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { NodeCommandRunner, GitClient } = await import('../src/exec/git.ts')
+    const repoDir = join(tmpRoot, 'manual-repo')
+    await mkdir(repoDir, { recursive: true })
+    await writeFile(join(repoDir, 'package.json'), JSON.stringify({ name: 'manual-repo', version: '1.0.0' }), 'utf8')
+    const runner = new NodeCommandRunner()
+    expect((await runner.run('git', ['init'], repoDir)).exitCode).toBe(0)
+
+    // Setup with a session that parses its repo path from the prompt and
+    // writes a real file, honoring the manual policy's no-commit rule.
+    const ctx = new Context()
+    await ctx.plugin(RepoBoardService)
+    const registry = fakeRegistry()
+    ;(ctx as unknown as { tools: unknown }).tools = registry
+    ;(ctx as unknown as { subagents: unknown }).subagents = {
+      async start(request: { prompt: { type: string; text?: string }[] }) {
+        const prompt = request.prompt.map(block => block.type === 'text' ? (block.text ?? '') : '').join('\n')
+        const pathMatch = /本地路径：(.+)/.exec(prompt)
+        expect(pathMatch).not.toBeNull()
+        await mkdir(join(pathMatch![1]!, 'src'), { recursive: true })
+        await writeFile(join(pathMatch![1]!, 'src', 'feature.ts'), 'export const reason = true\n', 'utf8')
+        // Manual policy forbids committing - verify the brief says so.
+        expect(prompt).toContain('不要执行任何 git commit')
+        return {
+          id: 'sess-manual',
+          result: Promise.resolve({
+            output: [{ type: 'text', text: 'done' }],
+            structured: { summary: '新增 reason 支持', changedFiles: ['src/feature.ts'] },
+            stopReason: 'end_turn',
+          }),
+        }
+      },
+    }
+    toolsPlugin.apply(ctx)
+    const tool = (name: string) => {
+      const definition = registry.definitions.get(name)
+      if (definition === undefined) throw new Error('tool not registered: ' + name)
+      return (args: unknown) => definition.execute(args, toolExec(args))
+    }
+
+    const manualGraphPath = join(tmpRoot, 'manual-graph.json')
+    await tool('repo_board_scan')({ project: 'manual-demo', graphPath: manualGraphPath, repos: [{ key: 'manual-repo', path: repoDir }] })
+    const dispatch = await tool('repo_board_dispatch')({ text: '新增取消原因' })
+    const requirementId = (dispatch as { requirementId: string }).requirementId
+
+    const spec = await tool('repo_board_spec')({
+      requirementId,
+      spec: {
+        text: '新增取消原因',
+        goals: ['携带 reason'],
+        candidateRepos: ['manual-repo'],
+        constraints: [],
+        acceptance: ['reason 可用'],
+      },
+    })
+    const skeleton = (spec as { planSkeletons: { repo: string; prerequisites: string[] }[] }).planSkeletons[0]!
+    await tool('repo_board_plans')({
+      requirementId,
+      plans: [{ ...skeleton, summary: '新增 reason 字段', changes: [{ target: 'src/feature.ts', description: '导出 reason' }] }],
+    })
+
+    // Execute under the manual policy: the repo parks at submit-pending.
+    const execution = await tool('repo_board_execute')({ requirementId, commitPolicy: 'manual' })
+    const execResult = execution as {
+      run: { perRepo: { repo: string; state: string; submitRequest?: { branch: string; changedFiles: string[] } }[] }
+      next: string
+    }
+    expect(execResult.run.perRepo[0]!.state).toBe('submit-pending')
+    expect(execResult.run.perRepo[0]!.submitRequest).toEqual({
+      branch: 'ai-delivery/' + requirementId + '/manual-repo',
+      summary: '新增 reason 字段',
+      // The fresh checkout has no commits, so package.json counts as changed too.
+      changedFiles: ['package.json', 'src/feature.ts'],
+    })
+    expect(execResult.next).toContain('repo_board_submit')
+
+    // The checkout sits on the requirement branch with the change uncommitted.
+    const git = new GitClient(runner)
+    expect(await git.currentBranch(repoDir)).toBe('ai-delivery/' + requirementId + '/manual-repo')
+
+    // Approve: the host commits on the requirement branch.
+    const submit = await tool('repo_board_submit')({ requirementId, repo: 'manual-repo', decision: 'approve' })
+    const submitResult = submit as { state: string; commit: string }
+    expect(submitResult.state).toBe('submitted')
+    expect(submitResult.commit).toMatch(/^[0-9a-f]{40}$/)
+    const status = await git.status(repoDir)
+    expect(status.clean).toBe(true)
+    expect(status.branch).toBe('ai-delivery/' + requirementId + '/manual-repo')
+
+    // Approving twice refuses: the repo is no longer pending.
+    await expect(tool('repo_board_submit')({ requirementId, repo: 'manual-repo', decision: 'approve' }))
+      .rejects.toThrow(/not waiting for a submit decision/)
   })
 })

@@ -334,4 +334,16 @@ export class RequirementRecord {
     }
     return new RequirementRecord({ ...this.doc, status: 'dispatched', run })
   }
+
+  /**
+   * Replace the attached run after a submit decision or re-dispatch
+   * (16.1): approve turns submit-pending into submitted, reject into
+   * needs-human. Only a dispatched record carries a run to replace.
+   */
+  updateRun(run: ExecutionRun): RequirementRecord {
+    if (this.doc.status !== 'dispatched') {
+      throw new TypeError('only dispatched requirements have a run to update')
+    }
+    return new RequirementRecord({ ...this.doc, run })
+  }
 }

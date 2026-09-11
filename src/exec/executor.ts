@@ -12,7 +12,8 @@
  * @module dsh-repo-board
  */
 
-import type { RepoModificationPlan, RepoRunRecord, RepoRunState, ExecutionRun } from '../pipeline/types.ts'
+import type { RepoModificationPlan, RepoRunRecord, RepoRunState, ExecutionRun, SubmitRequest } from '../pipeline/types.ts'
+import { isProtectedBranch } from './git.ts'
 
 /** What one repo task may report back. */
 export type RepoTaskOutcome =
@@ -25,10 +26,25 @@ export interface RepoTaskContext {
   readonly plan: RepoModificationPlan
   /** Local checkout path when known from the graph. */
   readonly repoPath?: string
+  /** Requirement branch the executor has prepared (blank when none). */
+  readonly branch: string
+  /** 1-based attempt number; a retry carries the failure history (17.3). */
+  readonly attempt: number
+  readonly previousErrors: readonly string[]
 }
 
 /** The injected per-repo worker (one DSH session per repo in production). */
 export type RepoTask = (context: RepoTaskContext) => Promise<RepoTaskOutcome>;
+
+/**
+ * The git seam the executor needs for branch discipline and the submit gate
+ * (16.1); satisfied structurally by GitClient, faked in tests.
+ */
+export interface RepoGitGateway {
+  checkoutBranch(cwd: string, branch: string): Promise<void>
+  listChangedFiles(cwd: string): Promise<string[]>
+  commitAll(cwd: string, message: string): Promise<string>
+}
 
 /** Options for one execution run. */
 export interface ExecutePlansOptions {
@@ -36,6 +52,20 @@ export interface ExecutePlansOptions {
   readonly repoPaths?: Readonly<Record<string, string>>
   /** Parallel cap within one readiness batch; default: whole batch. */
   readonly concurrency?: number
+  /** Branch base; effective branch = plan.branch ?? base + '/' + plan.repo. */
+  readonly branchBase?: string
+  /** Who commits: the session itself (auto, default) or a human after the gate (manual). */
+  readonly commitPolicy?: 'auto' | 'manual'
+  /** Git operations for branch checkout and host-side commits; enables branch discipline. */
+  readonly git?: RepoGitGateway
+  /** Attempts per repo before giving up (17.3 loop cap); default 1. */
+  readonly maxAttempts?: number
+}
+
+/** Effective requirement branch for one plan (6.2 branch rule). */
+function branchOf(plan: RepoModificationPlan, base: string | undefined): string {
+  if (plan.branch !== undefined && plan.branch !== '') return plan.branch
+  return (base ?? 'ai-delivery') + '/' + plan.repo
 }
 
 /**
@@ -67,9 +97,11 @@ export async function executePlans(
   }
 
   const stateByRepo = new Map<string, RepoRunState>(plans.map(plan => [plan.repo, 'pending' as RepoRunState]))
-  const extras = new Map<string, { commit?: string; diffSummary?: string; sessionId?: string }>()
+  const extras = new Map<string, { commit?: string; diffSummary?: string; sessionId?: string; submitRequest?: SubmitRequest }>()
   const errors: string[] = []
   const executed = new Set<string>()
+  const commitPolicy = options.commitPolicy ?? 'auto'
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 1)
 
   const blockDependents = (repo: string): void => {
     const stack = [...(dependents.get(repo) ?? [])]
@@ -82,39 +114,106 @@ export async function executePlans(
     }
   }
 
+  /**
+   * The submit gate (16.1). Auto policy trusts the session's own commit;
+   * manual policy stops at a pending submit request - the host-side commit
+   * happens only in the service, after a human approves.
+   */
+  const settleSuccess = async (repo: string, plan: RepoModificationPlan, repoPath: string | undefined): Promise<RepoRunState> => {
+    if (options.git === undefined || repoPath === undefined || commitPolicy === 'auto') {
+      return 'succeeded'
+    }
+    const changed = await options.git.listChangedFiles(repoPath)
+    if (changed.length === 0) {
+      // Nothing left to commit - the session's report stands as-is.
+      return 'succeeded'
+    }
+    const branch = branchOf(plan, options.branchBase)
+    extras.set(repo, {
+      ...extras.get(repo),
+      submitRequest: { branch, summary: plan.summary, changedFiles: changed },
+    })
+    return 'submit-pending'
+  }
+
   const runOne = async (repo: string): Promise<void> => {
     if (stateByRepo.get(repo) !== 'pending') return
     stateByRepo.set(repo, 'running')
     const plan = byRepo.get(repo)!
-    let outcome: RepoTaskOutcome
-    try {
-      outcome = await task({ plan, repoPath: options.repoPaths?.[repo] })
-    } catch (error) {
-      outcome = { state: 'failed', error: error instanceof Error ? error.message : String(error) }
-    }
-    executed.add(repo)
-    if (outcome.state === 'succeeded') {
-      stateByRepo.set(repo, 'succeeded')
-      extras.set(repo, {
-        commit: outcome.commit,
-        diffSummary: outcome.diffSummary,
-        sessionId: outcome.sessionId,
-      })
-      for (const dependent of dependents.get(repo) ?? []) {
-        const left = (remainingPrereqs.get(dependent) ?? 0) - 1
-        remainingPrereqs.set(dependent, left)
-        if (left === 0 && stateByRepo.get(dependent) === 'pending') ready.push(dependent)
+    const repoPath = options.repoPaths?.[repo]
+    const branch = branchOf(plan, options.branchBase)
+
+    // Branch discipline (6.2): prepare the requirement branch before the
+    // session touches the checkout; protected names never run.
+    if (options.git !== undefined && repoPath !== undefined) {
+      if (isProtectedBranch(branch)) {
+        stateByRepo.set(repo, 'needs-human')
+        errors.push(repo + ': plan names protected branch ' + branch + ' - refusing to run')
+        blockDependents(repo)
+        return
       }
+      try {
+        await options.git.checkoutBranch(repoPath, branch)
+      } catch (error) {
+        stateByRepo.set(repo, 'needs-human')
+        errors.push(repo + ': branch checkout failed: ' + (error instanceof Error ? error.message : String(error)))
+        blockDependents(repo)
+        return
+      }
+    }
+
+    const previousErrors: string[] = []
+    for (let attempt = 1; ; attempt++) {
+      let outcome: RepoTaskOutcome
+      try {
+        outcome = await task({ plan, repoPath, branch, attempt, previousErrors: [...previousErrors] })
+      } catch (error) {
+        outcome = { state: 'failed', error: error instanceof Error ? error.message : String(error) }
+      }
+      executed.add(repo)
+      if (outcome.state === 'succeeded') {
+        let nextState: RepoRunState
+        try {
+          nextState = await settleSuccess(repo, plan, repoPath)
+        } catch (error) {
+          const message = 'commit gate failed: ' + (error instanceof Error ? error.message : String(error))
+          stateByRepo.set(repo, 'needs-human')
+          errors.push(repo + ': ' + message)
+          blockDependents(repo)
+          return
+        }
+        stateByRepo.set(repo, nextState)
+        if (nextState === 'submit-pending') {
+          errors.push(repo + ': waiting for human submit approval (branch ' + branch + ')')
+        }
+        extras.set(repo, {
+          ...extras.get(repo),
+          commit: extras.get(repo)?.commit ?? outcome.commit,
+          diffSummary: outcome.diffSummary,
+          sessionId: outcome.sessionId,
+        })
+        for (const dependent of dependents.get(repo) ?? []) {
+          const left = (remainingPrereqs.get(dependent) ?? 0) - 1
+          remainingPrereqs.set(dependent, left)
+          if (left === 0 && stateByRepo.get(dependent) === 'pending') ready.push(dependent)
+        }
+        return
+      }
+      if (outcome.state === 'failed' && attempt < maxAttempts) {
+        // Defect loop (17.3): retry with the failure history in context.
+        previousErrors.push(outcome.error)
+        continue
+      }
+      if (outcome.state === 'failed') {
+        stateByRepo.set(repo, 'failed')
+        errors.push(repo + (previousErrors.length > 0 ? ' (after ' + (attempt) + ' attempts): ' : ': ') + outcome.error)
+      } else {
+        stateByRepo.set(repo, 'needs-human')
+        errors.push(repo + ': ' + outcome.reason)
+      }
+      blockDependents(repo)
       return
     }
-    if (outcome.state === 'failed') {
-      stateByRepo.set(repo, 'failed')
-      errors.push(repo + ': ' + outcome.error)
-    } else {
-      stateByRepo.set(repo, 'needs-human')
-      errors.push(repo + ': ' + outcome.reason)
-    }
-    blockDependents(repo)
   }
 
   let ready: string[] = plans
@@ -157,6 +256,7 @@ export async function executePlans(
       sessionId: extra?.sessionId,
       commit: extra?.commit,
       diffSummary: extra?.diffSummary,
+      submitRequest: extra?.submitRequest,
     }
   })
   return { perRepo, errors }

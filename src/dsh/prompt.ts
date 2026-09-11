@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Prompt and schema builders for the one-session-per-repo executor binding
  * (docs/product-design.md 6). Pure functions: fully unit-testable, no host
  * imports.
@@ -39,10 +39,26 @@ export function buildRepoSessionPrompt(input: {
   readonly spec: RequirementSpec
   readonly repoPath?: string
   readonly upstreamResults: readonly { repo: string; summary: string; commit?: string }[]
+  /** Requirement branch the executor has prepared for this repo. */
+  readonly branch?: string
+  /** False when the host commits after human approval; the session must not commit. */
+  readonly selfCommit?: boolean
+  /** 1-based attempt number for defect retries. */
+  readonly attempt?: number
+  /** Failure history from previous attempts (17.3 defect loop). */
+  readonly previousErrors?: readonly string[]
 }): string {
   const { plan, spec, repoPath, upstreamResults } = input
+  const selfCommit = input.selfCommit ?? true
   const lines: string[] = []
   lines.push('你是多仓协同开发中负责单仓修改的执行者（一会话一仓）。')
+  lines.push('只承担当前仓库的实现职责：基于需求、方案与代码事实工作，禁止编造信息；信息不足时明确提出问题而不是自行假设。')
+  if ((input.attempt ?? 1) > 1) {
+    lines.push('')
+    lines.push('## 重试')
+    lines.push('这是第 ' + input.attempt + ' 次尝试。此前失败原因（逐条修复，不要重复同样的错误）：')
+    lines.push(bulletList(input.previousErrors ?? [], '无记录'))
+  }
   lines.push('')
   lines.push('## 需求规格')
   lines.push(spec.text)
@@ -55,6 +71,9 @@ export function buildRepoSessionPrompt(input: {
   lines.push('')
   lines.push('## 你负责的仓库：' + plan.repo)
   if (repoPath !== undefined) lines.push('本地路径：' + repoPath)
+  if (input.branch !== undefined && input.branch !== '') {
+    lines.push('需求分支：' + input.branch + '（调度方已切好；不要切换、创建或删除分支）')
+  }
   lines.push('改动摘要：' + plan.summary)
   lines.push('改动点：')
   lines.push(bulletList(plan.changes.map(change => change.target + ' - ' + change.description), '由你根据摘要自行确定'))
@@ -76,12 +95,17 @@ export function buildRepoSessionPrompt(input: {
     lines.push('')
   }
   lines.push('## 要求')
-  lines.push('1. 只修改 ' + plan.repo + ' 仓库；不要动其他仓库。')
+  lines.push('1. 只修改 ' + plan.repo + ' 仓库；不要动其他仓库。保持最小变更，只做计划内改动。')
   lines.push('2. 在仓库内完成修改后运行可用的测试或构建验证。')
-  lines.push('3. 用 git 提交你的修改（信息用 conventional commits 风格）。')
-  lines.push('4. 不要 push；由调度方统一决定推送。')
-  lines.push('5. 完成后按结构化输出报告：summary（改了什么）、commit（提交哈希）、changedFiles（改动文件列表）。')
-  lines.push('6. 如果无法完成（需求矛盾、缺少信息、上游未就绪），在 summary 中明确说明原因并停止，不要强行提交半成品。')
+  lines.push('3. 禁止安装任何依赖（npm/pnpm/yarn/pip/poetry/go get 等）；缺少依赖视为阻塞，在 summary 中说明。')
+  lines.push('4. 测试无法本地执行时如实标记 needs_ci 并说明原因，严禁伪造测试结果。')
+  if (selfCommit) {
+    lines.push('5. 用 git 提交你的修改（信息用 conventional commits 风格）；不要 push，由调度方统一决定推送。')
+  } else {
+    lines.push('5. 不要执行任何 git commit / push；改完留在工作区即可，人工确认后由调度方提交。')
+  }
+  lines.push('6. 完成后按结构化输出报告：summary（改了什么）、commit（提交哈希，未提交则省略）、changedFiles（改动文件列表）。')
+  lines.push('7. 如果无法完成（需求矛盾、缺少信息、上游未就绪），在 summary 中明确说明原因并停止，不要强行提交半成品。')
   return lines.join('\n')
 }
 

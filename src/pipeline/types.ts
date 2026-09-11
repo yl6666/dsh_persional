@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Requirement pipeline artifacts - the handoff contracts between the eight
  * dispatch steps (docs/product-design.md 13.3, 5.2, 5.3).
  *
@@ -119,6 +119,15 @@ export interface RepoModificationPlan {
   /** Repos whose plans must finish first (from the graph, upstream first). */
   readonly prerequisites: readonly string[]
   readonly acceptance: readonly string[]
+  /** Requirement branch this plan's changes belong on (6.2 branch rule). */
+  readonly branch?: string
+}
+
+/** The submit-gate artifact one repo produces under manual commit policy (16.1). */
+export interface SubmitRequest {
+  readonly branch: string
+  readonly summary: string
+  readonly changedFiles: readonly string[]
 }
 
 /** Per-repo run state for steps [5]-[6]. */
@@ -129,6 +138,8 @@ export type RepoRunState =
   | 'failed'
   | 'rolled-back'
   | 'needs-human'
+  | 'submit-pending'
+  | 'submitted'
 
 /** One repo's slice of an execution run. */
 export interface RepoRunRecord {
@@ -137,6 +148,8 @@ export interface RepoRunRecord {
   readonly state: RepoRunState
   readonly commit?: string
   readonly diffSummary?: string
+  /** Present while the repo waits for a human submit decision (16.1). */
+  readonly submitRequest?: SubmitRequest
 }
 
 /** Steps [5]-[6]: the execution run snapshot. */

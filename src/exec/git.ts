@@ -51,7 +51,10 @@ function parseStatus(stdout: string): GitStatus {
   const untracked: string[] = []
   for (const raw of lines(stdout)) {
     if (raw.startsWith('## ')) {
-      const head = raw.slice(3)
+      let head = raw.slice(3)
+      // An unborn HEAD reports `## No commits yet on <branch>`; strip the
+      // prefix so the branch name parses the same as a born checkout.
+      if (head.startsWith('No commits yet on ')) head = head.slice('No commits yet on '.length)
       branch = (head.split(/\s+/)[0] ?? head).split('...')[0]!
       const aheadMatch = /\bahead (\d+)/.exec(head)
       const behindMatch = /\bbehind (\d+)/.exec(head)
@@ -70,6 +73,17 @@ function parseStatus(stdout: string): GitStatus {
   }
   const clean = staged.length === 0 && modified.length === 0 && untracked.length === 0
   return { branch, ahead, behind, staged, modified, untracked, clean }
+}
+
+/** Branches AI changes must never land on directly (6.2 branch rule). */
+const PROTECTED_BRANCHES = ['main', 'master', 'develop', 'HEAD']
+
+/** True when `branch` is a protected trunk branch no AI change may touch. */
+export function isProtectedBranch(branch: string): boolean {
+  const name = branch.trim()
+  if (name === '') return true
+  if (PROTECTED_BRANCHES.includes(name)) return true
+  return name === 'release' || name.startsWith('release/')
 }
 
 /** Git operations for one host, against any number of checkouts. */
@@ -97,27 +111,42 @@ export class GitClient {
     return result.exitCode === 0 && result.stdout.trim() === 'true'
   }
 
-  /** Current branch name (or the detached HEAD hash). */
+  /** Current branch name; symbolic-ref works on an unborn HEAD too. */
   async currentBranch(cwd: string): Promise<string> {
-    return (await this.require(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)).trim()
+    const result = await this.git(['symbolic-ref', '--short', 'HEAD'], cwd)
+    if (result.exitCode === 0) return result.stdout.trim()
+    // Detached HEAD: symbolic-ref refuses; report it as such.
+    return 'HEAD'
   }
 
-  /** Porcelain status summary. */
+  /** Porcelain status summary (untracked files fully expanded, no dir folding). */
   async status(cwd: string): Promise<GitStatus> {
-    return parseStatus(await this.require(['status', '--porcelain=v1', '--branch'], cwd))
+    return parseStatus(
+      await this.require(['status', '--porcelain=v1', '--branch', '--untracked-files=all'], cwd),
+    )
   }
 
   /** Files changed vs `base` (or vs HEAD for staged+worktree changes). */
   async listChangedFiles(cwd: string, base?: string): Promise<string[]> {
-    const out = await this.require(
+    const result = await this.git(
       base === undefined ? ['diff', '--name-only', 'HEAD'] : ['diff', '--name-only', base],
       cwd,
     )
-    return lines(out)
+    if (result.exitCode === 0) return lines(result.stdout)
+    // Unborn HEAD (a fresh checkout with no commits yet): everything staged,
+    // modified, or untracked counts as changed.
+    const status = await this.status(cwd)
+    return [...status.staged, ...status.modified, ...status.untracked]
   }
 
   /** Stage everything and commit with the board identity. Returns the new hash. */
   async commitAll(cwd: string, message: string): Promise<string> {
+    // Branch discipline (6.2): porcelain status, because rev-parse based
+    // branch lookup fails on an unborn HEAD.
+    const { branch } = await this.status(cwd)
+    if (isProtectedBranch(branch)) {
+      throw new Error('refusing to commit on protected branch ' + branch + ' in ' + cwd)
+    }
     await this.require(['add', '-A'], cwd)
     await this.require(
       [
@@ -128,6 +157,14 @@ export class GitClient {
       cwd,
     )
     return (await this.require(['rev-parse', 'HEAD'], cwd)).trim()
+  }
+
+  /** Create-or-reset `branch` and check it out; refuses protected names (6.2). */
+  async checkoutBranch(cwd: string, branch: string): Promise<void> {
+    if (isProtectedBranch(branch)) {
+      throw new Error('refusing to check out protected branch ' + branch + ' in ' + cwd)
+    }
+    await this.require(['checkout', '-B', branch], cwd)
   }
 
   /** Push the current branch to its upstream (or `origin HEAD` when unset). */
