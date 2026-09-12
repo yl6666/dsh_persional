@@ -29,6 +29,33 @@ function toolExec(args: unknown): ToolRunContext {
   }
 }
 
+/**
+ * Mirror of the host's lossless-JSON output rule (dsh-util-values
+ * walkJsonValue): one undefined property value rejects the whole tool
+ * output ("value is not lossless JSON"). JSON.stringify silently drops
+ * undefined, so plain toEqual assertions never catch this class of bug.
+ */
+function assertLosslessJson(value: unknown, ancestors: Set<object> = new Set(), path = 'output'): void {
+  if (value === undefined) throw new Error(`${path} is undefined - the real host rejects this output`)
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return
+  if (typeof value === 'number') {
+    expect(Number.isFinite(value) && !Object.is(value, -0)).toBe(true)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) assertLosslessJson(item, ancestors, `${path}[${index}]`)
+    return
+  }
+  if (typeof value === 'object') {
+    expect(ancestors.has(value)).toBe(false)
+    ancestors.add(value)
+    for (const [key, entry] of Object.entries(value)) assertLosslessJson(entry, ancestors, `${path}.${key}`)
+    ancestors.delete(value)
+    return
+  }
+  throw new Error(`${path} is not lossless JSON (${typeof value})`)
+}
+
 describe('hostCapabilities probe', () => {
   it('reports nothing on a plain cordis context and detects fakes', () => {
     const bare = hostCapabilities(new Context())
@@ -235,7 +262,12 @@ describe('tools plugin end-to-end over demo repos', () => {
     const tool = (name: string) => {
       const definition = registry.definitions.get(name)
       if (definition === undefined) throw new Error('tool not registered: ' + name)
-      return (args: unknown) => definition.execute(args, toolExec(args))
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        // Every tool output must survive the host's lossless-JSON snapshot.
+        assertLosslessJson(output)
+        return output
+      }
     }
 
     const scan = await tool('repo_board_scan')({
@@ -389,7 +421,12 @@ describe('tools plugin end-to-end over demo repos', () => {
     const tool = (name: string) => {
       const definition = registry.definitions.get(name)
       if (definition === undefined) throw new Error('tool not registered: ' + name)
-      return (args: unknown) => definition.execute(args, toolExec(args))
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        // Every tool output must survive the host's lossless-JSON snapshot.
+        assertLosslessJson(output)
+        return output
+      }
     }
 
     const manualGraphPath = join(tmpRoot, 'manual-graph.json')

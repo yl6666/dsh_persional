@@ -145,6 +145,37 @@ function textRender(_args: unknown, value: unknown): ContentBlock[] {
   return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }]
 }
 
+/**
+ * Deep-strip undefined-valued properties, mirroring what JSON.stringify
+ * keeps. The real host snapshots tool outputs under lossless-JSON rules
+ * (dsh-util-values walkJsonValue) where ONE undefined property value rejects
+ * the whole output ("value is not lossless JSON") - optional fields must be
+ * absent, not undefined. JSON.stringify silently drops them, which is why
+ * fake-host tests never caught this.
+ */
+function jsonify(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(item => jsonify(item))
+  if (typeof value === 'object' && value !== null) {
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === undefined) continue
+      out[key] = jsonify(entry)
+    }
+    return out
+  }
+  return value
+}
+
+/** Register one tool with host-safe (lossless-JSON) output normalization. */
+function registerTool(tools: ToolsRegistryLike, tool: RawToolDefinition): void {
+  tools.register({
+    ...tool,
+    async execute(args, exec) {
+      return jsonify(await tool.execute(args, exec))
+    },
+  })
+}
+
 function summarizeGraph(document: RepoGraphDocument): unknown {
   return {
     project: document.project,
@@ -173,14 +204,14 @@ export function apply(ctx: Context): void {
   // (plain-property fallback keeps direct-apply unit tests working).
   const tools = (ctx as { tools?: ToolsRegistryLike }).tools
   if (tools === undefined) return
-  tools.register(scanTool(ctx))
-  tools.register(graphTool(ctx))
-  tools.register(dispatchTool(ctx))
-  tools.register(clarifyTool(ctx))
-  tools.register(specTool(ctx))
-  tools.register(plansTool(ctx))
-  tools.register(executeTool(ctx))
-  tools.register(submitTool(ctx))
+  registerTool(tools, scanTool(ctx))
+  registerTool(tools, graphTool(ctx))
+  registerTool(tools, dispatchTool(ctx))
+  registerTool(tools, clarifyTool(ctx))
+  registerTool(tools, specTool(ctx))
+  registerTool(tools, plansTool(ctx))
+  registerTool(tools, executeTool(ctx))
+  registerTool(tools, submitTool(ctx))
 }
 
 function scanTool(ctx: Context): RawToolDefinition {

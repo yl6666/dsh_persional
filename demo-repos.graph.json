@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "project": "demo-repos",
+  "updatedAt": "2026-09-12T08:03:50.655Z",
+  "nodes": {
+    "shared-sdk": {
+      "name": "@acme/shared-sdk",
+      "path": "D:\\install\\dsh\\pluge\\test\\demo-repos\\shared-sdk",
+      "labels": [],
+      "fingerprint": "fnv1a64:1c78366b6ee9f5f4",
+      "meta": {
+        "build": [
+          "npm"
+        ]
+      }
+    },
+    "order-service": {
+      "name": "@acme/order-service",
+      "path": "D:\\install\\dsh\\pluge\\test\\demo-repos\\order-service",
+      "labels": [],
+      "fingerprint": "fnv1a64:db5705eefa481156",
+      "meta": {
+        "build": [
+          "npm"
+        ]
+      }
+    },
+    "notify-service": {
+      "name": "@acme/notify-service",
+      "path": "D:\\install\\dsh\\pluge\\test\\demo-repos\\notify-service",
+      "labels": [],
+      "fingerprint": "fnv1a64:b54e33c51480c58f",
+      "meta": {
+        "build": [
+          "npm"
+        ]
+      }
+    },
+    "web-portal": {
+      "name": "@acme/web-portal",
+      "path": "D:\\install\\dsh\\pluge\\test\\demo-repos\\web-portal",
+      "labels": [],
+      "fingerprint": "fnv1a64:2b047cd470eec076",
+      "meta": {
+        "build": [
+          "npm"
+        ]
+      }
+    }
+  },
+  "edges": [
+    {
+      "id": "notify-service->shared-sdk::build",
+      "from": "notify-service",
+      "to": "shared-sdk",
+      "type": "build",
+      "strength": 1,
+      "source": "auto",
+      "status": "candidate",
+      "versionConstraint": "^1.2.0"
+    },
+    {
+      "id": "order-service->shared-sdk::build",
+      "from": "order-service",
+      "to": "shared-sdk",
+      "type": "build",
+      "strength": 1,
+      "source": "auto",
+      "status": "candidate",
+      "versionConstraint": "^1.2.0"
+    },
+    {
+      "id": "web-portal->order-service::build",
+      "from": "web-portal",
+      "to": "order-service",
+      "type": "build",
+      "strength": 1,
+      "source": "auto",
+      "status": "candidate",
+      "versionConstraint": "^0.1.0"
+    },
+    {
+      "id": "web-portal->shared-sdk::build",
+      "from": "web-portal",
+      "to": "shared-sdk",
+      "type": "build",
+      "strength": 1,
+      "source": "auto",
+      "status": "candidate",
+      "versionConstraint": "^1.2.0"
+    },
+    {
+      "id": "notify-service->order-service::contract::order.cancelled",
+      "from": "notify-service",
+      "to": "order-service",
+      "type": "contract",
+      "contractRef": {
+        "kind": "event",
+        "name": "order.cancelled"
+      },
+      "strength": 0.9,
+      "source": "auto",
+      "status": "candidate"
+    },
+    {
+      "id": "web-portal->order-service::contract::/orders",
+      "from": "web-portal",
+      "to": "order-service",
+      "type": "contract",
+      "contractRef": {
+        "kind": "api",
+        "name": "/orders"
+      },
+      "strength": 0.9,
+      "source": "auto",
+      "status": "candidate"
+    },
+    {
+      "id": "web-portal->order-service::contract::listOrders",
+      "from": "web-portal",
+      "to": "order-service",
+      "type": "contract",
+      "contractRef": {
+        "kind": "api",
+        "name": "listOrders"
+      },
+      "strength": 0.9,
+      "source": "auto",
+      "status": "candidate"
+    }
+  ],
+  "suppressed": []
+}
