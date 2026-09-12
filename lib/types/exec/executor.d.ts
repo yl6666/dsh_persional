@@ -34,6 +34,13 @@ export interface RepoTaskContext {
     readonly repoPath?: string;
     /** Requirement branch the executor has prepared (blank when none). */
     readonly branch: string;
+    /**
+     * False when the path is not the root of its own git work tree: there is
+     * no git state to protect, and any git command run at the path would
+     * resolve UPWARD into an enclosing repository. Sessions must be told not
+     * to touch git at all.
+     */
+    readonly isRepo?: boolean;
     /** 1-based attempt number; a retry carries the failure history (17.3). */
     readonly attempt: number;
     readonly previousErrors: readonly string[];

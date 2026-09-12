@@ -52,7 +52,11 @@ function isRepoSessionOutput(value: unknown): value is RepoSessionOutput {
  * later prompts through the shared collector.
  */
 export function buildRepoSessionTask(options: RepoSessionTaskOptions): RepoTask {
-  return async ({ plan, repoPath, branch, attempt, previousErrors }): Promise<RepoTaskOutcome> => {
+  return async ({ plan, repoPath, branch, isRepo, attempt, previousErrors }): Promise<RepoTaskOutcome> => {
+    // A path that is not its own work tree root must never be committed at:
+    // git there resolves into the enclosing repo. The session is told to
+    // keep away from git entirely; the host commits nothing either.
+    const noGit = isRepo === false
     const prompt = buildRepoSessionPrompt({
       plan,
       spec: options.spec,
@@ -60,7 +64,8 @@ export function buildRepoSessionTask(options: RepoSessionTaskOptions): RepoTask 
       branch,
       attempt,
       previousErrors,
-      selfCommit: options.selfCommit,
+      noGit,
+      selfCommit: noGit ? false : options.selfCommit,
       upstreamResults: options.upstream.results.filter(result => plan.prerequisites.includes(result.repo)),
     })
     const run = await options.subagents.start(options.provider ?? DEFAULT_SUBAGENT_PROVIDER, {

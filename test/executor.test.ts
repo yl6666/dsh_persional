@@ -277,6 +277,71 @@ describe('branch discipline and the submit gate', () => {
     expect(run.perRepo[0]).toMatchObject({ state: 'succeeded', commit: 'abc' })
   })
 
+  it('manual policy never enters the submit gate for a non-repo path, even with an enclosing dirty work tree (real git)', async () => {
+    const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { GitClient, NodeCommandRunner } = await import('../src/exec/git.ts')
+    const runner = new NodeCommandRunner()
+    const client = new GitClient(runner)
+    const parent = await mkdtemp(join(tmpdir(), 'repo-board-nogate-'))
+    const inner = join(parent, 'packages', 'inner')
+    await mkdir(inner, { recursive: true })
+    await writeFile(join(parent, 'base.txt'), 'base\n', 'utf8')
+    expect((await runner.run('git', ['init'], parent)).exitCode).toBe(0)
+    expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'add', '-A'], parent)).exitCode).toBe(0)
+    expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'commit', '-m', 'init'], parent)).exitCode).toBe(0)
+    // Somebody else left a dirty file in the ENCLOSING checkout. Before the
+    // gate fix, listChangedFiles resolved upward, saw it, and parked the
+    // repo at submit-pending listing the parent's file - approve would have
+    // committed the parent.
+    await writeFile(join(parent, 'someone-else.txt'), 'dirty\n', 'utf8')
+
+    const run = await executePlans([plan('inner')], async () => ({ state: 'succeeded', sessionId: 'sess-1' }), {
+      repoPaths: { inner }, git: client, commitPolicy: 'manual', branchBase: 'ai-delivery/req-1',
+    })
+    expect(run.perRepo[0]!.state).toBe('succeeded')
+    expect(run.perRepo[0]!.submitRequest).toBeUndefined()
+    // The enclosing checkout was not committed.
+    expect((await runner.run('git', ['log', '-1', '--pretty=%s'], parent)).stdout.trim()).toBe('init')
+  })
+
+  it.runIf(process.platform === 'win32')(
+    'a junction-spelled checkout root still gets full branch discipline (real git)',
+    async () => {
+      const { execFileSync } = await import('node:child_process')
+      const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
+      const { tmpdir } = await import('node:os')
+      const { join } = await import('node:path')
+      const { GitClient, NodeCommandRunner } = await import('../src/exec/git.ts')
+      const runner = new NodeCommandRunner()
+      const client = new GitClient(runner)
+      const dir = await mkdtemp(join(tmpdir(), 'repo-board-junction-'))
+      const physical = join(dir, 'svc-repo')
+      await mkdir(physical, { recursive: true })
+      await writeFile(join(physical, 'base.txt'), 'base\n', 'utf8')
+      expect((await runner.run('git', ['init', '-b', 'main'], physical)).exitCode).toBe(0)
+      expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'add', '-A'], physical)).exitCode).toBe(0)
+      expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'commit', '-m', 'init'], physical)).exitCode).toBe(0)
+
+      // Same checkout, junction spelling: before the realpath fix the probe
+      // answered "not a repo", discipline was skipped, and an auto-policy
+      // session committing at the junction landed straight on main.
+      const junction = join(dir, 'svc-link')
+      execFileSync('cmd', ['/c', 'mklink', '/J', junction, physical])
+
+      const contexts: { branch: string; isRepo?: boolean }[] = []
+      const run = await executePlans([plan('svc')], async context => {
+        contexts.push({ branch: context.branch, isRepo: context.isRepo })
+        return { state: 'succeeded', sessionId: 'sess-1' }
+      }, { repoPaths: { svc: junction }, git: client, branchBase: 'ai-delivery/req-1' })
+      expect(run.perRepo[0]!.state).toBe('succeeded')
+      expect(contexts[0]).toEqual({ branch: 'ai-delivery/req-1/svc', isRepo: true })
+      // The physical checkout sits on the requirement branch.
+      expect(await client.currentBranch(physical)).toBe('ai-delivery/req-1/svc')
+    },
+  )
+
   it('manual policy parks untracked-only changes at the submit gate (real git)', async () => {
     const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
     const { tmpdir } = await import('node:os')

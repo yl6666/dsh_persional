@@ -43,6 +43,12 @@ export function buildRepoSessionPrompt(input: {
   readonly branch?: string
   /** False when the host commits after human approval; the session must not commit. */
   readonly selfCommit?: boolean
+  /**
+   * True when the path is not the root of its own git work tree. Any git
+   * command run there resolves into the ENCLOSING repository, so the
+   * session must not touch git at all - it just edits files.
+   */
+  readonly noGit?: boolean
   /** 1-based attempt number for defect retries. */
   readonly attempt?: number
   /** Failure history from previous attempts (17.3 defect loop). */
@@ -99,7 +105,9 @@ export function buildRepoSessionPrompt(input: {
   lines.push('2. 在仓库内完成修改后运行可用的测试或构建验证。')
   lines.push('3. 禁止安装任何依赖（npm/pnpm/yarn/pip/poetry/go get 等）；缺少依赖视为阻塞，在 summary 中说明。')
   lines.push('4. 测试无法本地执行时如实标记 needs_ci 并说明原因，严禁伪造测试结果。')
-  if (selfCommit) {
+  if (input.noGit === true) {
+    lines.push('5. 该目录不是独立的 git 仓库：直接修改文件即可，严禁执行任何 git 命令（add/commit/branch 等都会作用到外层仓库）。')
+  } else if (selfCommit) {
     lines.push('5. 用 git 提交你的修改（信息用 conventional commits 风格）；不要 push，由调度方统一决定推送。')
   } else {
     lines.push('5. 不要执行任何 git commit / push；改完留在工作区即可，人工确认后由调度方提交。')

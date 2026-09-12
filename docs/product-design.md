@@ -663,8 +663,17 @@ boot manifest 含 `{"id":"dsh-repo-board"}`、分发的 client bundle 契约正�
 | `listChangedFiles` 用 `diff HEAD`，漏 untracked | 会话只建新文件时 manual 模式**静默绕过人工提交门控** | 改为 porcelain status（staged+modified+untracked） |
 | 二批澄清整体替换 answers | 已记录回答被抹掉，阻塞闸门重开 | beginClarification 保留幸存问题的旧答案；resolveClarification 改合并 |
 
-- 测试：`pnpm test` → 157 全绿（12 文件；含真实 git 全链路 manual/auto/重派集成测试）。
+第三轮（isRepo 误判族系，事故驱动发现）：修复期间一次测试运行把插件仓库自身切上了 `ai-delivery/req-1/*` 分支、fix commit 落在了测试切出的分支上——顺着事故挖出同根三缺陷：
+
+| 发现 | 后果 | 修复 |
+|---|---|---|
+| `isRepo` 用 `--is-inside-work-tree` | 父仓库内的普通目录被判为仓库，`checkout -B` 劫持**外层仓库** | 改为 `--show-toplevel === 路径`（realpath 归一化 junction/短名/大小写；`core.quotepath=off` 防非 ASCII 路径被 C 引号包裹） |
+| 非仓库路径的 auto 会话仍被指示「用 git 提交」 | 顺从会话 `git add -A; commit` 向上解析，**提交落在外层主干**并卷入无关脏文件 | 探针结果穿透进任务上下文（`isRepo`）与 prompt：非仓库路径 rule 5 变为「严禁执行任何 git 命令」 |
+| manual 模式非仓库路径照常进提交门控 | `listChangedFiles` 读到外层脏文件 → submit-pending 列出**别人的文件**，approve 即提交外层 | settleSuccess 对非仓库路径直接判 succeeded，不触碰 git |
+
+- 测试：`pnpm test` → 164 全绿（12 文件；含真实 git 全链路 manual/auto/重派/junction/嵌套目录集成测试）。
 - 宿主能力全部**运行时探测**（`ctx.get` / inject 声明）：DSH 宿主齐全时全量注册，裸 cordis 环境降级为纯领域库（`exports["./core"]`）。
+- 独立评审工具两轮调用均在 30 分钟超时（quick/full 深度均未能完成）——上述发现全部来自人工架构评审 + 评审代理留下的已验证复现（每条已转化为回归测试）；此为覆盖缺口，非安全背书。
 - 待办（§12 剩余决策点）：LLM 语义标注开关、git push 凭据策略。
 - P1 待办（评审遗留中危）：`checkout -B` 交叉需求重置语义、auto 模式会话自述无 git 事实核验、stopReason 非 completed 仍可判成功、执行结果落盘窗口；加上仓库画像（build/test 命令注入提示词）、工件分文件存储（`<graphDir>/requirements/<id>/`）。
 

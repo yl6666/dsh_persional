@@ -101,6 +101,23 @@ describe('buildRepoSessionPrompt', () => {
     expect(prompt).toContain('只修改 notify-service 仓库')
     expect(prompt).toContain('不要 push')
   })
+
+  it('forbids all git when the path is not its own work tree', () => {
+    const spec: RequirementSpec = {
+      text: 'x', goals: [], candidateRepos: ['inner'], constraints: [], acceptance: [],
+    }
+    const plan: RepoModificationPlan = {
+      repo: 'inner', summary: 's', changes: [], writeScopes: [],
+      contractImpact: { breaking: [], downstream: [] }, prerequisites: [], acceptance: [],
+    }
+    const prompt = buildRepoSessionPrompt({ plan, spec, repoPath: 'D:/monorepo/packages/inner', upstreamResults: [], noGit: true })
+    // A git command at that path resolves into the enclosing repo - the
+    // session must be ordered away from git entirely, not merely from push.
+    expect(prompt).toContain('严禁执行任何 git 命令')
+    expect(prompt).not.toContain('用 git 提交你的修改')
+    expect(prompt).not.toContain('由调度方提交')
+    expect(prompt).not.toContain('调度方已切好')
+  })
 })
 
 describe('buildRepoSessionTask with a fake subagent runtime', () => {
@@ -718,5 +735,93 @@ describe('tools plugin end-to-end over demo repos', () => {
     expect(prompts[1]).toContain('这是第 2 次尝试')
     expect(prompts[1]).toContain('retry-repo: repo session ended without structured output')
     expect(prompts[1]).toContain('构建失败')
+  })
+
+  it('a repo entry that is a subdirectory of a larger work tree never hijacks the enclosing repo', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { NodeCommandRunner, GitClient } = await import('../src/exec/git.ts')
+    // An isolated enclosing repo: the entry directory is a plain subdir of
+    // it, NOT its own checkout. Before the isRepo fix, branch discipline
+    // resolved the entry to the nearest enclosing work tree and ran
+    // checkout -B on it - this exact defect once switched a branch in the
+    // plugin's own repository during a test run.
+    const parent = join(tmpRoot, 'nested-parent')
+    const inner = join(parent, 'packages', 'inner')
+    await mkdir(inner, { recursive: true })
+    await writeFile(join(inner, 'package.json'), JSON.stringify({ name: 'inner', version: '1.0.0' }), 'utf8')
+    const runner = new NodeCommandRunner()
+    expect((await runner.run('git', ['init'], parent)).exitCode).toBe(0)
+    const identity = ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid']
+    expect((await runner.run('git', [...identity, 'add', '-A'], parent)).exitCode).toBe(0)
+    expect((await runner.run('git', [...identity, 'commit', '-m', 'init'], parent)).exitCode).toBe(0)
+    const git = new GitClient(runner)
+    const trunk = await git.currentBranch(parent)
+    const trunkHead = (await runner.run('git', ['rev-parse', 'HEAD'], parent)).stdout.trim()
+
+    const prompts: string[] = []
+    const ctx = new Context()
+    await ctx.plugin(RepoBoardService)
+    const registry = fakeRegistry()
+    ;(ctx as unknown as { tools: unknown }).tools = registry
+    ;(ctx as unknown as { subagents: unknown }).subagents = {
+      async start(_provider: string, request: { prompt: { type: string; text?: string }[] }) {
+        const prompt = request.prompt.map(block => block.type === 'text' ? (block.text ?? '') : '').join('\n')
+        prompts.push(prompt)
+        // A non-checkout entry must not be told a branch was prepared, and
+        // must be told to keep away from git entirely.
+        expect(prompt).not.toContain('调度方已切好')
+        expect(prompt).toContain('严禁执行任何 git 命令')
+        // An OBEDIENT session: it commits only when the brief orders it
+        // (rule 5 under auto policy). Before the no-git fix the brief did
+        // order it, and the commit landed on the enclosing trunk.
+        if (prompt.includes('用 git 提交你的修改')) {
+          const pathMatch = /本地路径：(.+)/.exec(prompt)
+          const cwd = pathMatch![1]!
+          await writeFile(join(cwd, 'src-x.ts'), 'export const x = 1\n', 'utf8')
+          expect((await runner.run('git', [...identity, 'add', '-A'], cwd)).exitCode).toBe(0)
+          expect((await runner.run('git', [...identity, 'commit', '-m', 'feat(inner): x'], cwd)).exitCode).toBe(0)
+        }
+        return {
+          id: 'sess-nested',
+          result: Promise.resolve({
+            output: [{ type: 'text', text: 'done' }],
+            structured: { summary: 'inner done', changedFiles: ['src/x.ts'] },
+            stopReason: 'completed',
+          }),
+        }
+      },
+    }
+    toolsPlugin.apply(ctx)
+    const tool = (name: string) => {
+      const definition = registry.definitions.get(name)
+      if (definition === undefined) throw new Error('tool not registered: ' + name)
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        assertLosslessJson(output)
+        return output
+      }
+    }
+
+    const nestedGraphPath = join(tmpRoot, 'nested-graph.json')
+    await tool('repo_board_scan')({ project: 'nested-demo', graphPath: nestedGraphPath, repos: [{ key: 'inner', path: inner }] })
+    const dispatch = await tool('repo_board_dispatch')({ text: '改 inner' })
+    const requirementId = (dispatch as { requirementId: string }).requirementId
+    const spec = await tool('repo_board_spec')({
+      requirementId,
+      spec: { text: '改 inner', goals: [], candidateRepos: ['inner'], constraints: [], acceptance: [] },
+    })
+    const skeleton = (spec as { planSkeletons: { repo: string }[] }).planSkeletons[0]!
+    await tool('repo_board_plans')({ requirementId, plans: [{ ...skeleton, summary: '改 inner' }] })
+
+    const execution = await tool('repo_board_execute')({ requirementId })
+    const run = (execution as { run: { perRepo: { repo: string; state: string }[] } }).run
+    expect(run.perRepo[0]).toMatchObject({ repo: 'inner', state: 'succeeded' })
+
+    // The enclosing repo was never touched: same branch, same HEAD, no
+    // ai-delivery/* branch, and no session commit swept onto the trunk.
+    expect(await git.currentBranch(parent)).toBe(trunk)
+    expect((await runner.run('git', ['rev-parse', 'HEAD'], parent)).stdout.trim()).toBe(trunkHead)
+    expect((await runner.run('git', ['branch', '--list', 'ai-delivery/*'], parent)).stdout.trim()).toBe('')
+    expect((await runner.run('git', ['status', '--porcelain'], parent)).stdout.trim()).toBe('')
   })
 })

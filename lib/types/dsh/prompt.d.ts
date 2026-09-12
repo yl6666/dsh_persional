@@ -33,6 +33,12 @@ export declare function buildRepoSessionPrompt(input: {
     readonly branch?: string;
     /** False when the host commits after human approval; the session must not commit. */
     readonly selfCommit?: boolean;
+    /**
+     * True when the path is not the root of its own git work tree. Any git
+     * command run there resolves into the ENCLOSING repository, so the
+     * session must not touch git at all - it just edits files.
+     */
+    readonly noGit?: boolean;
     /** 1-based attempt number for defect retries. */
     readonly attempt?: number;
     /** Failure history from previous attempts (17.3 defect loop). */

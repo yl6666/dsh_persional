@@ -42,7 +42,14 @@ export declare class GitClient {
     constructor(runner: CommandRunner, identity?: GitIdentity);
     private git;
     private require;
-    /** True when `cwd` sits inside a git work tree. */
+    /**
+     * True when `cwd` is the ROOT of its own git work tree. "Inside a work
+     * tree" (`--is-inside-work-tree`) is not enough: a plain subdirectory of
+     * a larger checkout also reports true there, and branch discipline would
+     * then hijack the ENCLOSING repo - `checkout -B` / `add -A` would mutate
+     * the parent checkout the directory merely sits in. Anything that is not
+     * itself a checkout root must probe false.
+     */
     isRepo(cwd: string): Promise<boolean>;
     /** Current branch name; symbolic-ref works on an unborn HEAD too. */
     currentBranch(cwd: string): Promise<string>;

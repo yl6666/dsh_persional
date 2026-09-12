@@ -28,6 +28,13 @@ export interface RepoTaskContext {
   readonly repoPath?: string
   /** Requirement branch the executor has prepared (blank when none). */
   readonly branch: string
+  /**
+   * False when the path is not the root of its own git work tree: there is
+   * no git state to protect, and any git command run at the path would
+   * resolve UPWARD into an enclosing repository. Sessions must be told not
+   * to touch git at all.
+   */
+  readonly isRepo?: boolean
   /** 1-based attempt number; a retry carries the failure history (17.3). */
   readonly attempt: number
   readonly previousErrors: readonly string[]
@@ -125,10 +132,18 @@ export async function executePlans(
   /**
    * The submit gate (16.1). Auto policy trusts the session's own commit;
    * manual policy stops at a pending submit request - the host-side commit
-   * happens only in the service, after a human approves.
+   * happens only in the service, after a human approves. A path that is
+   * not its own work tree root never enters the gate at all: git run there
+   * resolves into the ENCLOSING repository, so listing changes or
+   * committing would sweep up somebody else's checkout.
    */
-  const settleSuccess = async (repo: string, plan: RepoModificationPlan, repoPath: string | undefined): Promise<RepoRunState> => {
-    if (options.git === undefined || repoPath === undefined || commitPolicy === 'auto') {
+  const settleSuccess = async (
+    repo: string,
+    plan: RepoModificationPlan,
+    repoPath: string | undefined,
+    isWorkTree: boolean,
+  ): Promise<RepoRunState> => {
+    if (!isWorkTree || options.git === undefined || repoPath === undefined || commitPolicy === 'auto') {
       return 'succeeded'
     }
     const changed = await options.git.listChangedFiles(repoPath)
@@ -153,10 +168,11 @@ export async function executePlans(
 
     // Branch discipline (6.2): prepare the requirement branch before the
     // session touches the checkout; protected names never run. Paths that
-    // are not git work trees get no discipline (and no branch claim in the
-    // prompt) - there is no git state to protect or commit to.
+    // are not the root of their own work tree get no discipline, no branch
+    // claim, and no git instructions at all - any git command run at such a
+    // path resolves into the enclosing repository (isRepo probe, 6.1).
+    let isWorkTree = true
     if (options.git !== undefined && repoPath !== undefined) {
-      let isWorkTree = true
       try {
         isWorkTree = await options.git.isRepo(repoPath)
       } catch {
@@ -189,7 +205,7 @@ export async function executePlans(
     for (let attempt = 1 + seeded.length; ; attempt++) {
       let outcome: RepoTaskOutcome
       try {
-        outcome = await task({ plan, repoPath, branch, attempt, previousErrors: [...previousErrors] })
+        outcome = await task({ plan, repoPath, branch, isRepo: isWorkTree, attempt, previousErrors: [...previousErrors] })
       } catch (error) {
         outcome = { state: 'failed', error: error instanceof Error ? error.message : String(error) }
       }
@@ -197,7 +213,7 @@ export async function executePlans(
       if (outcome.state === 'succeeded') {
         let nextState: RepoRunState
         try {
-          nextState = await settleSuccess(repo, plan, repoPath)
+          nextState = await settleSuccess(repo, plan, repoPath, isWorkTree)
         } catch (error) {
           const message = 'commit gate failed: ' + (error instanceof Error ? error.message : String(error))
           stateByRepo.set(repo, 'needs-human')
