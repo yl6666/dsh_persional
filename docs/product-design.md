@@ -354,10 +354,14 @@ RepoModificationPlan {
 1. **图谱粒度**：一张图 = 一个项目/一组相关仓，还是全局所有仓一张图？（倾向：一组相关仓一张图）
 2. **语义标注预算**：LLM 标注会消费 token，是否提供「仅静态」「静态+语义」分级开关 / 按仓重要性裁剪？
 3. **执行层选型**：优先基于 `ctx.agentTeams` 还是 `ctx.subagents` continuable？（倾向：先 subagents 起步，验证协同语义后再评估 agentTeams）
+   → 已按 subagents 落地（`start(provider, request)` one-shot，provider=`spawn`）。
 4. **人审分级**：方案评审 / 契约变更评审 / 每次 push 评审，哪些默认开启？
+   → 提交门控已落地（e2e 学习 6.3）：`commitPolicy=manual` 时每仓停在 submit-pending，
+   `repo_board_submit` 人工放行后才提交；push 仍永远人工。分级开关待按使用反馈裁剪。
 5. **git 凭据**：复用本机 SSH/credential manager，还是插件内配 token？
 6. **追问策略**：追问是「一次性问全」还是「随执行按需追问」？是否允许用户全局关闭追问（全自动模式）？
-7. **分发渠道**：npm 发布（真一键，推荐）/ GitHub + `prepare` / tarball？是否需要 GitHub Action 自动发 npm 的流水线？
+7. **分发渠道**：npm 发布（真一键）/ GitHub + 构建产物随仓库 / tarball？
+   → 已验证 GitHub 安装（零构建）与 tarball 两条路；npm 待发布。
 
 ---
 
@@ -604,13 +608,47 @@ ExecutionRun {                   // [5]-[6] 运行态快照
 | M2 | 仓库目录扫描、`repoBoard` 服务（图生命周期 + 人工编辑合并策略） | 68 tests |
 | M3 | 需求管道 artifact 链 + RequirementRecord 状态机 + 影响分析/方案骨架/冲突评审 | 85 tests |
 | M4 | git 封装（porcelain/commit/push）+ Kahn 拓扑分批执行器（一会话一仓） | 99 tests |
-| M4.5 | DSH 宿主绑定：结构化类型（零运行时依赖）、七个模型工具、子代理会话任务 | 106 tests |
+| M4.5 | DSH 宿主绑定：结构化类型（零运行时依赖）、模型工具、子代理会话任务 | 106 tests |
 | M5 | 看板 UI：纯函数布局视图模型、React SVG 关系编辑器、右栏标签页 + 停靠启动按钮、宿主 Web 路由、ModuleLoader 格式 client bundle | 120 tests |
-| 打包 | `pnpm pack` 42 文件（host lib + client.js + patch + README）；`prepare` 自包含构建链验证通过 | tarball 检查 |
+| 打包 | `pnpm pack`（host lib + client.js + patch + README）；lib 构建产物随仓库分发，git/tarball 安装零构建 | tarball 检查 |
 
-- 测试：`pnpm test` → 120/120（11 文件：领域核心 7 + 管道/执行器 + git + dsh 绑定 + 布局/组件/路由 3）。
-- 宿主能力全部**运行时探测**（`ctx.tools` / `ctx.subagents` / `ctx.webServer` / slots）：DSH 宿主齐全时全量注册，裸 cordis 环境降级为纯领域库（`exports["./core"]`）。
-- 待办（§12 决策点）：LLM 语义标注开关、git push 凭据策略、审批门控。
+### 15.1 真实宿主落地验证（本地 web profile 安装）
+
+在真实 DSH 宿主（`dsh plugin --profile web add github:yl6666/dsh_persional`）上安装并启动，
+暴露并修复了四类只有真实运行时才能发现的问题（模拟宿主的结构化测试全部测不出）：
+
+1. **pnpm 11 供应链策略**：`prepare` 构建钩子在内层 install 被 esbuild postinstall 拦截硬失败 →
+   改为生态惯例：无 prepare、lib 构建产物提交进仓库，安装零构建。
+2. **cordis 服务代理语义**：未声明 `inject` 的服务属性读取直接抛
+   `cannot get property "tools" without inject` → 两个插件补 inject 声明
+   （tools / webServer），可选服务改用官方 `ctx.get()` 探测。
+3. **子代理真实 API**：`start(provider, request)` 双参、`stopReason: 'completed'` 词表、
+   parent 必须传 `exec.agent`——按 in-tree tool-subagent 金标准重写。
+4. **前端 ModuleLoader 工厂契约**：`factory(require)` 单参调用、返回值即 exports、
+   自注册 id 必须用包名——按 dsh-plugin-nintendo 重写打包包装。
+
+验证方式：临时实例（`dsh web --port N`）boot 干净、宿主路由 200、
+boot manifest 含 `{"id":"dsh-repo-board"}`、分发的 client bundle 契约正确。
+
+### 15.2 e2e 设计文档学习的落地（P0 批次）
+
+学习 `deepseek-e2e-delivery`（单仓 e2e 交付插件）的硬护栏并移植到多仓执行器：
+
+| 学习点（来源章节） | 落地 |
+|---|---|
+| 分支纪律（6.2） | 每仓 `ai-delivery/<需求id>/<仓>` 分支，执行前预切；`main/master/develop/release/*` 保护分支双守卫（checkout + commit） |
+| 人工提交门控（6.3/4.5，关闭 §12 决策点 3） | `commitPolicy=manual`：会话只改不提交 → 停在 `submit-pending` 携 SubmitRequest 工件 → 第 8 个工具 `repo_board_submit` approve（host 侧提交）/ reject（记因转 needs-human） |
+| 缺陷重试闭环（17.3） | `maxAttempts`：失败仓带完整失败历史重新派发，needs-human 不重试 |
+| 单仓互斥（6.1） | 同仓同时只允许一条流水线，重叠派发直接拒绝 |
+| 提示词硬禁令（6.4/6.5/18.1） | 禁装依赖、禁伪造测试结果（如实标 needs_ci）、最小变更、禁编造、信息不足要提问 |
+
+状态词表扩展：`submit-pending` / `submitted`（`RequirementStatus` 仍止于 dispatched，细节在
+`RepoRunState`）；`RequirementRecord.updateRun` 保持不可变链。
+
+- 测试：`pnpm test` → 141 全绿（12 文件；含真实 git 全链路 manual 模式集成测试）。
+- 宿主能力全部**运行时探测**（`ctx.get` / inject 声明）：DSH 宿主齐全时全量注册，裸 cordis 环境降级为纯领域库（`exports["./core"]`）。
+- 待办（§12 剩余决策点）：LLM 语义标注开关、git push 凭据策略。
+- P1 待办（e2e 学习的后半批）：仓库画像（build/test 命令提取进 RepoNode.meta 注入提示词）、工件分文件存储（`<graphDir>/requirements/<id>/`）。
 
 ---
 

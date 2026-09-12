@@ -49,7 +49,21 @@ dsh plugin add ./dsh-repo-board-0.1.0.tgz
 
 模型走 `repo_board_dispatch → clarify → spec → plans → execute`，每仓一个子代理会话在本仓完成修改并提交（默认不 push）。
 
-### 2. 图形化看板（Graph Editor）
+### 2. 人工提交门控（manual 模式）
+
+默认 `commitPolicy=auto`：会话自己提交到需求分支 `ai-delivery/<需求id>/<仓>`。
+要人工把关时：
+
+```
+用 manual 模式执行这个需求，改完先停下来给我确认。
+```
+
+每仓改完停在 `submit-pending`（附分支、摘要、改动文件清单），模型把清单报给你，
+你确认后它调 `repo_board_submit`（approve=宿主侧提交 / reject=记录原因转 needs-human）。
+失败仓可按 `maxAttempts` 带失败历史重试；同一仓库同时只跑一条流水线；
+`main/master/develop/release/*` 分支受双守卫保护，永不写入。
+
+### 3. 图形化看板（Graph Editor）
 
 Web GUI 右侧栏出现「多仓看板」标签页（会话输入区也有 ⬡ 启动按钮）：
 
@@ -69,10 +83,10 @@ src/
   pipeline/   需求管道：DraftRequirement → Spec → ImpactAnalysis → Plans → ExecutionRun
   exec/       git 封装（porcelain 解析、commit/push/clone）+ Kahn 拓扑分批执行器
   dsh/        DSH 宿主绑定：结构化类型、每仓子代理提示词、会话任务
-  tools.ts    七个模型工具（raw JSON-Schema 定义）
+  tools.ts    八个模型工具（raw JSON-Schema 定义）
   webserver.ts 宿主 Web 路由（图/需求/边编辑）
   client/     浏览器半：布局视图模型 + React 看板 + 插件注册
-  service.ts  cordis 服务 repoBoard（图生命周期 + 需求登记 + 派发）
+  service.ts  cordis 服务 repoBoard（图生命周期 + 需求登记 + 派发 + 提交门控 + 单仓互斥）
 ```
 
 - **Host 半**：`cordis.patch.yml` 注册 `dsh-repo-board`（服务）、`/tools`（模型工具）、`/web`（路由）。
@@ -82,7 +96,7 @@ src/
 
 ```bash
 pnpm install
-pnpm test          # 120 tests (vitest)
+pnpm test          # 141 tests (vitest)
 pnpm typecheck     # tsc --noEmit
 pnpm run build:all # tsc (host) + esbuild (client bundle)
 pnpm pack          # 产出可安装 tarball
