@@ -585,15 +585,32 @@ function executeTool(ctx: Context): RawToolDefinition {
       const { subagents } = hostCapabilities(ctx)
       if (subagents === undefined) fail('this host provides no subagent runtime - cannot execute one-session-per-repo')
       if (exec.agent === undefined) fail('no calling agent - cannot parent repo sessions')
+      // Re-dispatch (17.3): repos that settled in a previous run do not
+      // re-execute, so their results seed the upstream collector directly.
+      const upstreamResults: { repo: string; summary: string; commit?: string }[] = []
+      if (document.run !== undefined) {
+        for (const entry of document.run.perRepo) {
+          if (entry.state === 'succeeded' || entry.state === 'submitted') {
+            upstreamResults.push({
+              repo: entry.repo,
+              summary: entry.submitRequest?.summary ?? entry.diffSummary ?? '已完成',
+              commit: entry.commit,
+            })
+          }
+        }
+      }
       const task = buildRepoSessionTask({
         subagents,
         parent: exec.agent,
         spec: document.spec,
-        upstream: { results: [] },
+        upstream: { results: upstreamResults },
         signal: exec.signal,
         selfCommit: commitPolicy === 'auto',
       })
-      const git = commitPolicy === 'manual' ? new GitClient(new NodeCommandRunner()) : undefined
+      // Branch discipline (6.2) applies under BOTH commit policies - only
+      // the commit actor differs (the session itself in auto mode, the host
+      // after the human gate in manual mode).
+      const git = new GitClient(new NodeCommandRunner())
       const { record: dispatched, run } = await board.dispatchRequirement(record, task, {
         concurrency,
         git,

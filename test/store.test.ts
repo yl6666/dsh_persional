@@ -129,6 +129,18 @@ describe('merge strategy (7.1)', () => {
     expect(() => store.mergeAutoEdges([{ from: 'a', to: 'x', type: 'build' }])).toThrow(TypeError)
   })
 
+  it('rejects an unknown contractRef.kind at write time, not at load time', () => {
+    const store = seededStore()
+    // Before the fix this persisted fine and then bricked the graph at the
+    // next open() (validateEdge rejects the kind on load).
+    expect(() => store.addManualEdge({
+      from: 'a', to: 'b', type: 'contract',
+      contractRef: { kind: 'bogus' as 'event', name: 'x' },
+    })).toThrow(/unknown contractRef\.kind/)
+    // Nothing was written: the store still serializes and reloads cleanly.
+    expect(() => store.toDocument()).not.toThrow()
+  })
+
   it('deterministic edge ids survive reloads', () => {
     const doc = acmeGraph()
     const expected = edgeId('notify-service', 'order-service', 'contract', 'order.cancelled')

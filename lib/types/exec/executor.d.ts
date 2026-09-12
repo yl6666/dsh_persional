@@ -45,7 +45,9 @@ export type RepoTask = (context: RepoTaskContext) => Promise<RepoTaskOutcome>;
  * (16.1); satisfied structurally by GitClient, faked in tests.
  */
 export interface RepoGitGateway {
+    isRepo(cwd: string): Promise<boolean>;
     checkoutBranch(cwd: string, branch: string): Promise<void>;
+    currentBranch(cwd: string): Promise<string>;
     listChangedFiles(cwd: string): Promise<string[]>;
     commitAll(cwd: string, message: string): Promise<string>;
 }
@@ -63,6 +65,12 @@ export interface ExecutePlansOptions {
     readonly git?: RepoGitGateway;
     /** Attempts per repo before giving up (17.3 loop cap); default 1. */
     readonly maxAttempts?: number;
+    /**
+     * Failure history per repo from a previous run (re-dispatch, 17.3): seeds
+     * previousErrors so the retry prompt carries what went wrong, and the
+     * attempt counter continues where the previous run stopped.
+     */
+    readonly history?: Readonly<Record<string, readonly string[]>>;
 }
 /**
  * Execute a plan set in dependency order and assemble the ExecutionRun.

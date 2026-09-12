@@ -60,6 +60,35 @@ describe('clarification gate (5.2)', () => {
     const record = RequirementRecord.create('req-1', draft, UPDATED_AT).attachSpec(spec())
     expect(record.status).toBe('spec-ready')
   })
+
+  it('a follow-up clarification batch keeps recorded answers for surviving questions', () => {
+    const followUp = [
+      ...questions,
+      {
+        id: 'notify-channel',
+        text: '取消后通知走哪个渠道？',
+        kind: 'select',
+        options: [{ label: 'push' }, { label: 'email' }],
+        blocking: false,
+      },
+    ] as const
+
+    // Batch 1 answers the blocking question; batch 2 extends the set and
+    // carries only the new answer. Before the fix, batch 2 wiped the
+    // batch-1 answer, the blocking gate reopened, and attachSpec failed.
+    const batch1 = RequirementRecord.create('req-1', draft, UPDATED_AT)
+      .beginClarification(questions)
+      .resolveClarification({ 'reason-field': '新增' })
+    const batch2 = batch1.beginClarification(followUp).resolveClarification({ 'notify-channel': 'push' })
+
+    expect(blockingAnswersComplete(batch2.toDocument().clarification!)).toBe(true)
+    expect(effectiveAnswers(batch2.toDocument().clarification!)).toEqual({
+      'reason-field': '新增',
+      'compat-window': '是',
+      'notify-channel': 'push',
+    })
+    expect(batch2.attachSpec(spec()).status).toBe('spec-ready')
+  })
 })
 
 function spec() {

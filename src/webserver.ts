@@ -11,7 +11,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { RepoBoardService } from './service.ts'
-import type { RepoEdgeType } from './graph/types.ts'
+import { CONTRACT_KINDS } from './graph/store.ts'
+import type { ContractKind, RepoEdgeType } from './graph/types.ts'
 
 /** Cordis plugin name. */
 export const name = 'repo-board-web'
@@ -154,13 +155,19 @@ export function apply(ctx: Context): void {
           const contractKind = typeof input['contractKind'] === 'string' && input['contractKind'] !== ''
             ? input['contractKind']
             : undefined
+          // The store validates kinds at write time too, but a clear 422
+          // beats a TypeError from the depths: an unvalidated kind would
+          // otherwise persist an edge that bricks the file at next load.
+          if (contractKind !== undefined && !CONTRACT_KINDS.includes(contractKind)) {
+            throw new Error('contractKind 必须是 ' + CONTRACT_KINDS.join('/') + ' 之一')
+          }
           await board.addManualEdge({
             from: requireString(input, 'from'),
             to: requireString(input, 'to'),
             type,
             contractRef: contractName === undefined
               ? undefined
-              : { kind: (contractKind ?? 'other') as 'other', name: contractName },
+              : { kind: (contractKind ?? 'other') as ContractKind, name: contractName },
           })
         } else {
           const id = requireString(input, 'id')

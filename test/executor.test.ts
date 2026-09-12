@@ -21,15 +21,26 @@ function plan(repo: string, prerequisites: string[] = [], extra: Partial<RepoMod
 function fakeGit(changes: Readonly<Record<string, string[]>> = {}, commitPrefix = 'hash-'): RepoGitGateway & {
   checkouts: string[]
   commits: { cwd: string; message: string }[]
+  branches: Map<string, string>
   failCheckout?: Error
+  notRepos: Set<string>
 } {
   const gateway = {
     checkouts: [] as string[],
     commits: [] as { cwd: string; message: string }[],
+    branches: new Map<string, string>(),
     failCheckout: undefined as Error | undefined,
+    notRepos: new Set<string>(),
+    async isRepo(cwd: string) {
+      return !gateway.notRepos.has(cwd)
+    },
     async checkoutBranch(cwd: string, branch: string) {
       if (gateway.failCheckout !== undefined) throw gateway.failCheckout
+      gateway.branches.set(cwd, branch)
       gateway.checkouts.push(cwd + '@' + branch)
+    },
+    async currentBranch(cwd: string) {
+      return gateway.branches.get(cwd) ?? 'main'
     },
     async listChangedFiles(cwd: string) {
       return [...(changes[cwd] ?? [])]
@@ -210,6 +221,21 @@ describe('branch discipline and the submit gate', () => {
     expect(run.errors[0]).toContain('branch checkout failed')
   })
 
+  it('a path that is not a git work tree skips branch discipline and the branch claim', async () => {
+    const git = fakeGit()
+    git.notRepos.add('D:/plain-dir')
+    const contexts: { branch: string; repoPath?: string }[] = []
+    const run = await executePlans([plan('a'), plan('b')], async context => {
+      contexts.push(context)
+      return { state: 'succeeded' }
+    }, { repoPaths: { a: 'D:/plain-dir', b: 'D:/b' }, git })
+    expect(run.errors).toEqual([])
+    // The non-git path ran with no branch (no discipline possible, no false
+    // "scheduler has checked it out" claim in the prompt); the git one did not.
+    expect(contexts.map(context => context.branch)).toEqual(['', 'ai-delivery/b'])
+    expect(git.checkouts).toEqual(['D:/b@ai-delivery/b'])
+  })
+
   it('manual policy stops at a submit request with the changed-file list', async () => {
     const git = fakeGit({ 'D:/a': ['src/x.ts', 'src/y.ts'] })
     const run = await executePlans([plan('a', [], { summary: '支持超时取消' })], async () => ({
@@ -250,6 +276,36 @@ describe('branch discipline and the submit gate', () => {
     const run = await executePlans([plan('a')], async () => ({ state: 'succeeded', commit: 'abc' }))
     expect(run.perRepo[0]).toMatchObject({ state: 'succeeded', commit: 'abc' })
   })
+
+  it('manual policy parks untracked-only changes at the submit gate (real git)', async () => {
+    const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { GitClient, NodeCommandRunner } = await import('../src/exec/git.ts')
+    const runner = new NodeCommandRunner()
+    const client = new GitClient(runner)
+    const dir = await mkdtemp(join(tmpdir(), 'repo-board-exec-'))
+    expect((await runner.run('git', ['init'], dir)).exitCode).toBe(0)
+    await writeFile(join(dir, 'base.txt'), 'base\n', 'utf8')
+    expect((await runner.run('git', ['add', '-A'], dir)).exitCode).toBe(0)
+    expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'commit', '-m', 'init'], dir)).exitCode).toBe(0)
+
+    // The session creates ONLY new files: before the listChangedFiles fix
+    // this run reported plain success with no submit request, silently
+    // bypassing the human gate.
+    const run = await executePlans([plan('demo-repo')], async ({ repoPath }) => {
+      await mkdir(join(repoPath!, 'src'), { recursive: true })
+      await writeFile(join(repoPath!, 'src', 'new-module.ts'), 'export const x = 1\n', 'utf8')
+      return { state: 'succeeded', sessionId: 'sess-1' }
+    }, {
+      repoPaths: { 'demo-repo': dir },
+      git: client,
+      commitPolicy: 'manual',
+      branchBase: 'ai-delivery/req-9',
+    })
+    expect(run.perRepo[0]!.state).toBe('submit-pending')
+    expect(run.perRepo[0]!.submitRequest!.changedFiles).toEqual(['src/new-module.ts'])
+  })
 })
 
 describe('defect retry loop', () => {
@@ -288,6 +344,34 @@ describe('defect retry loop', () => {
     expect(attempts).toBe(1)
     expect(run.perRepo[0]!.state).toBe('needs-human')
   })
+
+  it('seeds a re-dispatched repo with its prior failure history and continues the attempt count', async () => {
+    const seen: { repo: string; attempt: number; previousErrors: string[] }[] = []
+    const run = await executePlans([plan('a')], async ({ attempt, previousErrors }) => {
+      seen.push({ repo: 'a', attempt, previousErrors: [...previousErrors] })
+      return { state: 'succeeded', commit: 'second-run' }
+    }, {
+      // One attempt burned in a previous run: this run starts at attempt 2.
+      history: { a: ['a (after 1 attempts): tests red'] },
+      maxAttempts: 3,
+    })
+    expect(run.perRepo[0]).toMatchObject({ state: 'succeeded', commit: 'second-run' })
+    expect(seen).toEqual([
+      { repo: 'a', attempt: 2, previousErrors: ['a (after 1 attempts): tests red'] },
+    ])
+  })
+
+  it('counts seeded history against the attempt cap', async () => {
+    let attempts = 0
+    const run = await executePlans([plan('a')], async () => {
+      attempts += 1
+      return { state: 'failed', error: 'still red' }
+    }, { history: { a: ['a: first failure'] }, maxAttempts: 2 })
+    // Cap 2 with one prior failure: exactly one more attempt runs.
+    expect(attempts).toBe(1)
+    expect(run.perRepo[0]!.state).toBe('failed')
+    expect(run.errors).toEqual(['a (after 2 attempts): still red'])
+  })
 })
 
 describe('dispatch with run', () => {
@@ -314,5 +398,43 @@ describe('dispatch with run', () => {
     const dispatched = planned.dispatch(run)
     expect(dispatched.status).toBe('dispatched')
     expect(dispatched.toDocument().run).toEqual(run)
+  })
+
+  it('reDispatch returns to planned, archives the run, and refuses without one', async () => {
+    const record = RequirementRecord.create('req-1', { text: 't' })
+    const spec = {
+      text: 't',
+      goals: [],
+      candidateRepos: ['order-service'],
+      constraints: [],
+      acceptance: [],
+    }
+    const graph = {
+      version: 1 as const,
+      project: 'p',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      nodes: { 'order-service': { name: 'order-service', labels: [] } },
+      edges: [],
+      suppressed: [],
+    }
+    const failedRun = { perRepo: [{ repo: 'order-service', state: 'failed' as const }], errors: ['order-service: tests red'] }
+    const dispatched = record.attachSpec(spec).analyze(graph).attachPlans([plan('order-service')]).dispatch(failedRun)
+
+    // No run attached (a dispatched-without-run record) refuses.
+    const bare = record.attachSpec(spec).analyze(graph).attachPlans([plan('order-service')]).dispatch()
+    expect(() => bare.reDispatch()).toThrow(/run can be re-dispatched/)
+
+    const again = dispatched.reDispatch()
+    expect(again.status).toBe('planned')
+    expect(again.toDocument().run).toBeUndefined()
+    // The superseded run survives in the append-only history.
+    expect(again.toDocument().runHistory).toEqual([failedRun])
+    // Re-dispatching twice would duplicate history - the second call refuses.
+    expect(() => again.reDispatch()).toThrow(/run can be re-dispatched/)
+
+    const secondRun = { perRepo: [{ repo: 'order-service', state: 'succeeded' as const }], errors: [] }
+    const reDispatched = again.dispatch(secondRun)
+    expect(reDispatched.toDocument().run).toEqual(secondRun)
+    expect(reDispatched.toDocument().runHistory).toEqual([failedRun])
   })
 })

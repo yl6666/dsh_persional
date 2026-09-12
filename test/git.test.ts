@@ -158,4 +158,24 @@ describe('GitClient against a real git checkout', () => {
     await writeFile(join(dir, 'src.txt'), 'hello again\n', 'utf8')
     expect(await client.listChangedFiles(dir)).toEqual(['src.txt'])
   })
+
+  it('listChangedFiles counts untracked files on a born HEAD - they are what commitAll would commit', async () => {
+    const runner = new NodeCommandRunner()
+    const client = new GitClient(runner)
+    const dir = await mkdtemp(join(tmpdir(), 'repo-board-untracked-'))
+    dirs.push(dir)
+    expect((await runner.run('git', ['init'], dir)).exitCode).toBe(0)
+    await writeFile(join(dir, 'base.txt'), 'base\n', 'utf8')
+    expect((await runner.run('git', ['add', '-A'], dir)).exitCode).toBe(0)
+    expect((await runner.run('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', 'commit', '-m', 'init'], dir)).exitCode).toBe(0)
+
+    // Only NEW files, no tracked modification: `git diff --name-only HEAD`
+    // returns empty here, and this call must not (submit-gate regression).
+    await writeFile(join(dir, 'new-module.ts'), 'export const x = 1\n', 'utf8')
+    expect(await client.listChangedFiles(dir)).toEqual(['new-module.ts'])
+
+    // Mixed: the modified file AND the new one both count.
+    await writeFile(join(dir, 'base.txt'), 'changed\n', 'utf8')
+    expect(await client.listChangedFiles(dir)).toEqual(['base.txt', 'new-module.ts'])
+  })
 })

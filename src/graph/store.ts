@@ -62,7 +62,8 @@ function suppressionKey(from: string, to: string, type: RepoEdgeType): string {
 }
 
 const EDGE_TYPES: readonly string[] = ['build', 'code', 'contract', 'semantic']
-const CONTRACT_KINDS: readonly string[] = ['event', 'api', 'table', 'schema', 'rpc', 'topic', 'other']
+/** Legal contract reference kinds (graph/types.ts ContractKind, runtime list). */
+export const CONTRACT_KINDS: readonly string[] = ['event', 'api', 'table', 'schema', 'rpc', 'topic', 'other']
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -278,6 +279,14 @@ export class RepoGraphStore {
   addManualEdge(input: ManualEdgeInput): RepoEdge {
     this.requireNode(input.from)
     this.requireNode(input.to)
+    // Write-time validation: an invalid kind here would persist fine but
+    // brick the graph file at the next load (validateEdge rejects it) - a
+    // hostile or buggy caller must fail before anything is written.
+    if (input.contractRef !== undefined && !CONTRACT_KINDS.includes(input.contractRef.kind)) {
+      throw new TypeError(
+        'RepoGraphStore.addManualEdge: unknown contractRef.kind ' + JSON.stringify(input.contractRef.kind),
+      )
+    }
     const edge = stripUndefined({
       id: edgeId(input.from, input.to, input.type, input.contractRef?.name),
       from: input.from,

@@ -32,6 +32,8 @@ export interface MergeReport {
     readonly skippedManual: number;
     readonly skippedSuppressed: number;
 }
+/** Legal contract reference kinds (graph/types.ts ContractKind, runtime list). */
+export declare const CONTRACT_KINDS: readonly string[];
 /** Validate the structure of a persisted graph document. Throws TypeError on malformed input. */
 export declare function validateRepoGraphDocument(value: unknown): asserts value is RepoGraphDocument;
 /**

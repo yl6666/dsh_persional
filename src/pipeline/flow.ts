@@ -278,10 +278,23 @@ export class RequirementRecord {
       throw new TypeError('clarification can only start from draft or clarifying status')
     }
     validateQuestions(questions)
+    // A follow-up batch replaces the question set but keeps the answers
+    // already recorded for questions that survive in it - the batched
+    // submission contract ("answers may arrive in batches") means a second
+    // round must never wipe what the first round already learned. Answers
+    // for questions that left the set go with them.
+    const previous = this.doc.clarification?.answers ?? {}
+    const surviving = new Set(questions.map(question => question.id))
+    const answers = Object.fromEntries(
+      Object.entries(previous).filter(([id]) => surviving.has(id)),
+    )
     return new RequirementRecord({
       ...this.doc,
       status: 'clarifying',
-      clarification: { questions },
+      clarification: {
+        questions,
+        ...(Object.keys(answers).length > 0 ? { answers } : {}),
+      },
     })
   }
 
@@ -291,9 +304,12 @@ export class RequirementRecord {
       throw new TypeError('no clarification session is open')
     }
     validateAnswers(this.doc.clarification, answers)
+    // Merge, not replace: a batch only carries its own answers, and earlier
+    // batches' answers must survive (batched-submission contract).
+    const previous = this.doc.clarification.answers ?? {}
     return new RequirementRecord({
       ...this.doc,
-      clarification: { ...this.doc.clarification, answers: { ...answers } },
+      clarification: { ...this.doc.clarification, answers: { ...previous, ...answers } },
     })
   }
 
@@ -345,5 +361,23 @@ export class RequirementRecord {
       throw new TypeError('only dispatched requirements have a run to update')
     }
     return new RequirementRecord({ ...this.doc, run })
+  }
+
+  /**
+   * Return a dispatched requirement to planned for a re-dispatch of its
+   * failed repos (17.3 defect loop): the superseded run moves to the
+   * append-only runHistory so the failure context survives, and the plans
+   * stay attached for the executor to retry against.
+   */
+  reDispatch(): RequirementRecord {
+    if (this.doc.status !== 'dispatched' || this.doc.run === undefined) {
+      throw new TypeError('only dispatched requirements with a run can be re-dispatched')
+    }
+    return new RequirementRecord({
+      ...this.doc,
+      status: 'planned',
+      run: undefined,
+      runHistory: [...(this.doc.runHistory ?? []), this.doc.run],
+    })
   }
 }

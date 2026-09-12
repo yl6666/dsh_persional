@@ -161,10 +161,22 @@ async function plannedRequirement(service: RepoBoardService, repos: string[]): P
     )
 }
 
-function fakeGitGateway(changes: string[]): RepoGitGateway & { commits: { cwd: string; message: string }[] } {
+function fakeGitGateway(changes: string[]): RepoGitGateway & {
+  commits: { cwd: string; message: string }[]
+  branches: Map<string, string>
+} {
   const gateway = {
     commits: [] as { cwd: string; message: string }[],
-    async checkoutBranch() {},
+    branches: new Map<string, string>(),
+    async isRepo() {
+      return true
+    },
+    async checkoutBranch(cwd: string, branch: string) {
+      gateway.branches.set(cwd, branch)
+    },
+    async currentBranch(cwd: string) {
+      return gateway.branches.get(cwd) ?? 'main'
+    },
     async listChangedFiles() {
       return [...changes]
     },
@@ -258,5 +270,119 @@ describe('dispatch mutex and the human submit gate (e2e design 6.1, 16.1)', () =
     expect(dispatched.toDocument().run!.perRepo[0]!.state).toBe('succeeded')
     await expect(service.approveSubmit(dispatched, 'order-service')).rejects.toThrow(/not waiting/)
     await expect(service.approveSubmit(dispatched, 'no-such-repo')).rejects.toThrow(/no run entry/)
+  })
+
+  it('submit-pending holds the per-repo mutex until the human decides', async () => {
+    const service = makeService()
+    await service.open('acme-demo', graphPath)
+    await service.scan(repos)
+    const record = await plannedRequirement(service, ['order-service'])
+    const git = fakeGitGateway(['src/order.ts'])
+
+    const { record: pending } = await service.dispatchRequirement(record, okTask, {
+      git, commitPolicy: 'manual',
+    })
+    expect(pending.toDocument().run!.perRepo[0]!.state).toBe('submit-pending')
+
+    // The run itself is over, but the repo's uncommitted worktree changes
+    // must not be caught by another requirement's dispatch (6.1).
+    const second = await plannedRequirement(service, ['order-service'])
+    await expect(service.dispatchRequirement(second, okTask)).rejects.toThrow(/running dispatch: order-service/)
+
+    // Rejecting settles the pending state and releases the mutex again.
+    await service.rejectSubmit(pending, 'order-service', '方案不对')
+    await expect(service.dispatchRequirement(second, okTask)).resolves.toBeDefined()
+  })
+
+  it('a re-dispatch is refused while any repo still awaits a submit decision', async () => {
+    const service = makeService()
+    await service.open('acme-demo', graphPath)
+    await service.scan(repos)
+    const record = await plannedRequirement(service, ['order-service'])
+    const git = fakeGitGateway(['src/order.ts'])
+
+    const { record: pending } = await service.dispatchRequirement(record, okTask, {
+      git, commitPolicy: 'manual',
+    })
+    await expect(service.dispatchRequirement(pending, okTask)).rejects.toThrow(/awaiting submit decisions/)
+  })
+
+  it('approve refuses when the worktree no longer sits on the submit branch', async () => {
+    const service = makeService()
+    await service.open('acme-demo', graphPath)
+    await service.scan(repos)
+    const record = await plannedRequirement(service, ['order-service'])
+    const git = fakeGitGateway(['src/order.ts'])
+    const repoPath = repos.find(repo => repo.key === 'order-service')!.path
+
+    const { record: pending } = await service.dispatchRequirement(record, okTask, {
+      git, commitPolicy: 'manual',
+    })
+    const branch = pending.toDocument().run!.perRepo[0]!.submitRequest!.branch
+
+    // Someone moved the worktree onto another branch while the request
+    // waited: committing would land on the wrong line of history.
+    git.branches.set(repoPath, 'ai-delivery/req-99/order-service')
+    await expect(service.approveSubmit(pending, 'order-service')).rejects.toThrow(/refusing to commit/)
+    expect(git.commits).toEqual([])
+
+    // Back on the request's branch, approve commits and releases the repo.
+    git.branches.set(repoPath, branch)
+    const submitted = await service.approveSubmit(pending, 'order-service')
+    expect(submitted.toDocument().run!.perRepo[0]!.state).toBe('submitted')
+  })
+
+  it('re-dispatch retries failed repos with their history and keeps settled results', async () => {
+    const service = makeService()
+    await service.open('acme-demo', graphPath)
+    await service.scan(repos)
+
+    // order <- notify chain: notify blocks when order fails.
+    const draft = await service.createRequirement({ text: '改动链' })
+    const spec = {
+      text: '改动链',
+      goals: [],
+      candidateRepos: ['order-service', 'notify-service'],
+      constraints: [],
+      acceptance: [],
+    }
+    const mkPlan = (repo: string, prerequisites: string[]) => ({
+      repo,
+      summary: '改动 ' + repo,
+      changes: [],
+      writeScopes: [],
+      contractImpact: { breaking: [], downstream: [] },
+      prerequisites,
+      acceptance: [],
+    })
+    const record = draft.record.attachSpec(spec).analyze(service.document)
+      .attachPlans([mkPlan('order-service', []), mkPlan('notify-service', ['order-service'])])
+
+    const first = await service.dispatchRequirement(record, async ({ plan }) =>
+      plan.repo === 'order-service' ? { state: 'failed', error: 'tests red' } : { state: 'succeeded' },
+    )
+    expect(first.run.perRepo.map(entry => [entry.repo, entry.state])).toEqual([
+      ['order-service', 'failed'],
+      ['notify-service', 'needs-human'],
+    ])
+
+    const seenHistory: Record<string, string[]> = {}
+    const second = await service.dispatchRequirement(first.record, async ({ plan, previousErrors }) => {
+      seenHistory[plan.repo] = [...previousErrors]
+      return { state: 'succeeded', commit: 'retry-' + plan.repo }
+    })
+    // Both repos re-ran; order carried its failure, notify its block reason.
+    expect(seenHistory['order-service']).toEqual(['order-service: tests red'])
+    expect(seenHistory['notify-service']).toEqual(['notify-service: blocked by upstream order-service'])
+    expect(second.run.perRepo.map(entry => [entry.repo, entry.state])).toEqual([
+      ['order-service', 'succeeded'],
+      ['notify-service', 'succeeded'],
+    ])
+    expect(second.run.errors).toEqual([])
+    // The superseded run survives in the append-only history.
+    expect(second.record.toDocument().runHistory).toHaveLength(1)
+
+    // Everything settled now: a third dispatch has nothing to re-run.
+    await expect(service.dispatchRequirement(second.record, okTask)).rejects.toThrow(/nothing to re-dispatch/)
   })
 })

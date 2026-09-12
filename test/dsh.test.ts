@@ -382,6 +382,81 @@ describe('tools plugin end-to-end over demo repos', () => {
     void ctx
   })
 
+  it('a follow-up clarification batch keeps earlier recorded answers', async () => {
+    const { registry } = await setup()
+    const tool = (name: string) => {
+      const definition = registry.definitions.get(name)
+      if (definition === undefined) throw new Error('tool not registered: ' + name)
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        assertLosslessJson(output)
+        return output
+      }
+    }
+
+    const graphPath2 = join(tmpRoot, 'clarify-graph.json')
+    await tool('repo_board_scan')({
+      project: 'clarify-demo',
+      graphPath: graphPath2,
+      repos: [{ key: 'order-service', path: join('test', 'demo-repos', 'order-service') }],
+    })
+    const dispatch = await tool('repo_board_dispatch')({ text: '订单超时自动取消' })
+    const requirementId = (dispatch as { requirementId: string }).requirementId
+
+    const blocking = {
+      id: 'reason-field',
+      text: 'order.cancelled 是否新增取消原因字段？',
+      kind: 'select',
+      options: [{ label: '新增', recommended: true }, { label: '不新增' }],
+      blocking: true,
+      context: 'notify-service 消费该事件',
+    }
+    const optional = {
+      id: 'compat-window',
+      text: '是否要求 30 天兼容？',
+      kind: 'confirm',
+      default: '是',
+      blocking: false,
+    }
+    const added = {
+      id: 'notify-channel',
+      text: '取消后通知渠道？',
+      kind: 'select',
+      options: [{ label: 'push' }, { label: 'email' }],
+      blocking: false,
+    }
+
+    // Batch 1: two questions, answer the blocking one.
+    const first = await tool('repo_board_clarify')({
+      requirementId,
+      questions: [blocking, optional],
+      answers: { 'reason-field': '新增' },
+    })
+    expect((first as { blockingAnswered: string }).blockingAnswered).toBe('1/1')
+
+    // Batch 2 (follow-up round): extend the set, supply only the new answer.
+    // Before the fix this wiped the batch-1 answer and reopened the gate.
+    const second = await tool('repo_board_clarify')({
+      requirementId,
+      questions: [blocking, optional, added],
+      answers: { 'notify-channel': 'push' },
+    })
+    expect((second as { blockingAnswered: string }).blockingAnswered).toBe('1/1')
+
+    // The spec still attaches: the human's batch-1 answer survived.
+    const spec = await tool('repo_board_spec')({
+      requirementId,
+      spec: {
+        text: '订单超时自动取消；新增 reason 字段',
+        goals: [],
+        candidateRepos: ['order-service'],
+        constraints: [],
+        acceptance: [],
+      },
+    })
+    expect((spec as { status: string }).status).toBe('analyzed')
+  })
+
   it('manual commit policy: requirement branch, submit gate, and host-side commit end to end', async () => {
     // One real git checkout the fake session actually edits.
     const { mkdir, writeFile } = await import('node:fs/promises')
@@ -481,5 +556,167 @@ describe('tools plugin end-to-end over demo repos', () => {
     // Approving twice refuses: the repo is no longer pending.
     await expect(tool('repo_board_submit')({ requirementId, repo: 'manual-repo', decision: 'approve' }))
       .rejects.toThrow(/not waiting for a submit decision/)
+  })
+
+  it('auto commit policy still enforces branch discipline: the session commits on the requirement branch, never the trunk', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { NodeCommandRunner, GitClient } = await import('../src/exec/git.ts')
+    const repoDir = join(tmpRoot, 'auto-repo')
+    await mkdir(repoDir, { recursive: true })
+    await writeFile(join(repoDir, 'package.json'), JSON.stringify({ name: 'auto-repo', version: '1.0.0' }), 'utf8')
+    const runner = new NodeCommandRunner()
+    expect((await runner.run('git', ['init'], repoDir)).exitCode).toBe(0)
+    const identity = ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid']
+    expect((await runner.run('git', [...identity, 'add', '-A'], repoDir)).exitCode).toBe(0)
+    expect((await runner.run('git', [...identity, 'commit', '-m', 'init'], repoDir)).exitCode).toBe(0)
+    const git = new GitClient(runner)
+    const trunk = await git.currentBranch(repoDir)
+    const trunkHead = (await runner.run('git', ['rev-parse', 'HEAD'], repoDir)).stdout.trim()
+
+    const prompts: string[] = []
+    const ctx = new Context()
+    await ctx.plugin(RepoBoardService)
+    const registry = fakeRegistry()
+    ;(ctx as unknown as { tools: unknown }).tools = registry
+    ;(ctx as unknown as { subagents: unknown }).subagents = {
+      async start(_provider: string, request: { prompt: { type: string; text?: string }[] }) {
+        const prompt = request.prompt.map(block => block.type === 'text' ? (block.text ?? '') : '').join('\n')
+        prompts.push(prompt)
+        const pathMatch = /本地路径：(.+)/.exec(prompt)
+        expect(pathMatch).not.toBeNull()
+        // The brief must truthfully say the scheduler prepared the branch -
+        // and the session (auto policy) commits on it itself.
+        expect(prompt).toContain('调度方已切好')
+        expect(prompt).toContain('用 git 提交你的修改')
+        const cwd = pathMatch![1]!
+        await writeFile(join(cwd, 'src-feature.ts'), 'export const x = 1\n', 'utf8')
+        expect((await runner.run('git', [...identity, 'add', '-A'], cwd)).exitCode).toBe(0)
+        expect((await runner.run('git', [...identity, 'commit', '-m', 'feat: x'], cwd)).exitCode).toBe(0)
+        return {
+          id: 'sess-auto',
+          result: Promise.resolve({
+            output: [{ type: 'text', text: 'done' }],
+            structured: {
+              summary: '新增 x',
+              commit: (await runner.run('git', ['rev-parse', 'HEAD'], cwd)).stdout.trim(),
+              changedFiles: ['src-feature.ts'],
+            },
+            stopReason: 'completed',
+          }),
+        }
+      },
+    }
+    toolsPlugin.apply(ctx)
+    const tool = (name: string) => {
+      const definition = registry.definitions.get(name)
+      if (definition === undefined) throw new Error('tool not registered: ' + name)
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        assertLosslessJson(output)
+        return output
+      }
+    }
+
+    const autoGraphPath = join(tmpRoot, 'auto-graph.json')
+    await tool('repo_board_scan')({ project: 'auto-demo', graphPath: autoGraphPath, repos: [{ key: 'auto-repo', path: repoDir }] })
+    const dispatch = await tool('repo_board_dispatch')({ text: '新增 x' })
+    const requirementId = (dispatch as { requirementId: string }).requirementId
+    const spec = await tool('repo_board_spec')({
+      requirementId,
+      spec: {
+        text: '新增 x',
+        goals: [],
+        candidateRepos: ['auto-repo'],
+        constraints: [],
+        acceptance: [],
+      },
+    })
+    const skeleton = (spec as { planSkeletons: { repo: string }[] }).planSkeletons[0]!
+    await tool('repo_board_plans')({ requirementId, plans: [{ ...skeleton, summary: '新增 x' }] })
+
+    const execution = await tool('repo_board_execute')({ requirementId })
+    const run = (execution as { run: { perRepo: { repo: string; state: string }[] } }).run
+    expect(run.perRepo[0]).toMatchObject({ repo: 'auto-repo', state: 'succeeded' })
+
+    // The session's commit landed on the requirement branch, never the trunk.
+    expect(await git.currentBranch(repoDir)).toBe('ai-delivery/' + requirementId + '/auto-repo')
+    expect((await runner.run('git', ['rev-parse', trunk], repoDir)).stdout.trim()).toBe(trunkHead)
+    expect((await runner.run('git', ['rev-parse', 'HEAD'], repoDir)).stdout.trim()).not.toBe(trunkHead)
+  })
+
+  it('re-dispatch carries the failure history into the retry prompt and merges runs', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const repoDir = join(tmpRoot, 'retry-repo')
+    await mkdir(repoDir, { recursive: true })
+    await writeFile(join(repoDir, 'package.json'), JSON.stringify({ name: 'retry-repo', version: '1.0.0' }), 'utf8')
+
+    const prompts: string[] = []
+    let calls = 0
+    const ctx = new Context()
+    await ctx.plugin(RepoBoardService)
+    const registry = fakeRegistry()
+    ;(ctx as unknown as { tools: unknown }).tools = registry
+    ;(ctx as unknown as { subagents: unknown }).subagents = {
+      async start(_provider: string, request: { prompt: { type: string; text?: string }[] }) {
+        calls += 1
+        prompts.push(request.prompt.map(block => block.type === 'text' ? (block.text ?? '') : '').join('\n'))
+        if (calls === 1) {
+          // No structured output: the session-task maps this to a failure.
+          return {
+            id: 'sess-retry-1',
+            result: Promise.resolve({ output: [{ type: 'text', text: '构建失败' }], stopReason: 'completed' }),
+          }
+        }
+        return {
+          id: 'sess-retry-2',
+          result: Promise.resolve({
+            output: [{ type: 'text', text: 'ok' }],
+            structured: { summary: '修复完成', changedFiles: ['src/fix.ts'] },
+            stopReason: 'completed',
+          }),
+        }
+      },
+    }
+    toolsPlugin.apply(ctx)
+    const tool = (name: string) => {
+      const definition = registry.definitions.get(name)
+      if (definition === undefined) throw new Error('tool not registered: ' + name)
+      return async (args: unknown) => {
+        const output = await definition.execute(args, toolExec(args))
+        assertLosslessJson(output)
+        return output
+      }
+    }
+
+    const retryGraphPath = join(tmpRoot, 'retry-graph.json')
+    await tool('repo_board_scan')({ project: 'retry-demo', graphPath: retryGraphPath, repos: [{ key: 'retry-repo', path: repoDir }] })
+    const dispatch = await tool('repo_board_dispatch')({ text: '修复构建' })
+    const requirementId = (dispatch as { requirementId: string }).requirementId
+    const spec = await tool('repo_board_spec')({
+      requirementId,
+      spec: {
+        text: '修复构建',
+        goals: [],
+        candidateRepos: ['retry-repo'],
+        constraints: [],
+        acceptance: [],
+      },
+    })
+    const skeleton = (spec as { planSkeletons: { repo: string }[] }).planSkeletons[0]!
+    await tool('repo_board_plans')({ requirementId, plans: [{ ...skeleton, summary: '修复构建' }] })
+
+    // First run: the repo session fails.
+    const first = await tool('repo_board_execute')({ requirementId })
+    const firstRun = (first as { run: { perRepo: { repo: string; state: string }[] } }).run
+    expect(firstRun.perRepo[0]).toMatchObject({ repo: 'retry-repo', state: 'failed' })
+
+    // Second call re-dispatches: the retry prompt carries the prior failure.
+    const second = await tool('repo_board_execute')({ requirementId })
+    const secondRun = (second as { run: { perRepo: { repo: string; state: string; commit?: string }[] } }).run
+    expect(secondRun.perRepo[0]).toMatchObject({ repo: 'retry-repo', state: 'succeeded' })
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]).toContain('这是第 2 次尝试')
+    expect(prompts[1]).toContain('retry-repo: repo session ended without structured output')
+    expect(prompts[1]).toContain('构建失败')
   })
 })

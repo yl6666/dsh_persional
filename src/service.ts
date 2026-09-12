@@ -249,6 +249,12 @@ export class RepoBoardService extends Service {
    * task runs once per plan (one DSH session per repo in production).
    * Manual commit policy stops each repo at a submit request (16.1); the
    * same requirement's repos may not overlap another running dispatch (6.1).
+   *
+   * A dispatched requirement re-enters here for a re-dispatch (17.3): repos
+   * that already succeeded stay put (their commits exist), everything else
+   * re-runs with its prior failure history seeded into the retry prompt.
+   * Repos still awaiting a submit decision block the whole re-dispatch -
+   * decide those first.
    */
   async dispatchRequirement(
     record: RequirementRecord,
@@ -260,37 +266,95 @@ export class RepoBoardService extends Service {
       maxAttempts?: number
     } = {},
   ): Promise<{ record: RequirementRecord; run: ExecutionRun }> {
-    if (record.status !== 'planned') {
+    let working = record
+    let previousRun: ExecutionRun | undefined
+    if (record.status === 'dispatched') {
+      const run = record.toDocument().run
+      if (run === undefined) throw new Error('repo board: dispatched requirement carries no run - cannot re-dispatch')
+      const pending = run.perRepo.filter(entry => entry.state === 'submit-pending').map(entry => entry.repo)
+      if (pending.length > 0) {
+        throw new Error(
+          'repo board: repos still awaiting submit decisions (' + pending.sort().join(', ') +
+          ') - approve or reject them before re-dispatching',
+        )
+      }
+      const settled = run.perRepo
+        .filter(entry => entry.state === 'succeeded' || entry.state === 'submitted')
+        .map(entry => entry.repo)
+      const plans = record.toDocument().plans
+      if (plans === undefined) throw new Error('repo board: dispatched requirement carries no plans')
+      if (plans.every(plan => settled.includes(plan.repo))) {
+        throw new Error('repo board: nothing to re-dispatch - every repo already settled')
+      }
+      working = record.reDispatch()
+      previousRun = run
+    } else if (record.status !== 'planned') {
       throw new Error('repo board: only planned requirements can be dispatched')
     }
-    const plans = record.toDocument().plans
+    const plans = working.toDocument().plans
     if (plans === undefined) throw new Error('repo board: planned requirement carries no plans')
+    const settledSet = previousRun === undefined
+      ? new Set<string>()
+      : new Set(previousRun.perRepo
+          .filter(entry => entry.state === 'succeeded' || entry.state === 'submitted')
+          .map(entry => entry.repo))
+    const plansToRun = plans.filter(plan => !settledSet.has(plan.repo))
     const repoPaths: Record<string, string> = {}
     for (const key of Object.keys(this.document.nodes)) {
       const path = this.document.nodes[key]?.path
       if (path !== undefined) repoPaths[key] = path
     }
     // Per-repo mutex (6.1): one pipeline per repo at a time.
-    const repos = plans.map(plan => plan.repo)
+    const repos = plansToRun.map(plan => plan.repo)
     const conflicts = repos.filter(repo => this.activeRepos.has(repo))
     if (conflicts.length > 0) {
       throw new Error('repo board: these repos already have a running dispatch: ' + conflicts.sort().join(', '))
     }
     for (const repo of repos) this.activeRepos.add(repo)
+    // Re-dispatch failure history (17.3): each retried repo's prior errors.
+    const history: Record<string, readonly string[]> = {}
+    if (previousRun !== undefined) {
+      for (const plan of plansToRun) {
+        const prefix = plan.repo + ':'
+        const prior = previousRun.errors.filter(error => error.startsWith(prefix))
+        if (prior.length > 0) history[plan.repo] = prior
+      }
+    }
+    let run: ExecutionRun
     try {
-      const run = await executePlans(plans, task, {
+      run = await executePlans(plansToRun, task, {
         repoPaths,
         concurrency: options.concurrency,
         git: options.git,
         commitPolicy: options.commitPolicy,
         maxAttempts: options.maxAttempts,
-        branchBase: 'ai-delivery/' + record.toDocument().id,
+        branchBase: 'ai-delivery/' + working.toDocument().id,
+        history,
       })
-      this.lastGit = options.git
-      return { record: record.dispatch(run), run }
-    } finally {
+    } catch (error) {
       for (const repo of repos) this.activeRepos.delete(repo)
+      throw error
     }
+    // Submit-pending repos stay under the mutex until their human decision:
+    // their uncommitted worktree changes must not be caught by another run.
+    const holding = new Set(run.perRepo.filter(entry => entry.state === 'submit-pending').map(entry => entry.repo))
+    for (const repo of repos) {
+      if (!holding.has(repo)) this.activeRepos.delete(repo)
+    }
+    this.lastGit = options.git
+    let finalRun = run
+    if (previousRun !== undefined) {
+      const retained = previousRun.perRepo.filter(entry => settledSet.has(entry.repo))
+      const retainedRepos = new Set(retained.map(entry => entry.repo))
+      const retainedErrors = previousRun.errors.filter(error =>
+        [...retainedRepos].some(repo => error.startsWith(repo + ':')),
+      )
+      finalRun = {
+        perRepo: [...retained, ...run.perRepo.filter(entry => !retainedRepos.has(entry.repo))],
+        errors: [...retainedErrors, ...run.errors],
+      }
+    }
+    return { record: working.dispatch(finalRun), run: finalRun }
   }
 
   /**
@@ -317,6 +381,16 @@ export class RepoBoardService extends Service {
     }
     const repoPath = this.document.nodes[repo]?.path
     if (repoPath === undefined) throw new Error('repo board: repo ' + repo + ' has no checkout path in the graph')
+    // The worktree must still sit on the submit request's branch: anything
+    // else means someone moved it after the session finished, and the
+    // pending changes may no longer be what the human approved.
+    const branch = await this.lastGit.currentBranch(repoPath)
+    if (branch !== entry.submitRequest.branch) {
+      throw new Error(
+        'repo board: ' + repo + ' is on branch ' + branch + ' but its submit request expects ' +
+        entry.submitRequest.branch + ' - refusing to commit',
+      )
+    }
     const commit = await this.lastGit.commitAll(
       repoPath,
       options.message ?? 'ai(' + repo + '): ' + entry.submitRequest.summary,
@@ -329,6 +403,8 @@ export class RepoBoardService extends Service {
     }
     const next = record.updateRun(nextRun)
     await this.replaceRequirement(next)
+    // The submit decision settles the repo: release the per-repo mutex (6.1).
+    this.activeRepos.delete(repo)
     return next
   }
 
@@ -355,6 +431,8 @@ export class RepoBoardService extends Service {
     }
     const next = record.updateRun(nextRun)
     await this.replaceRequirement(next)
+    // The rejection settles the pending state: release the per-repo mutex.
+    this.activeRepos.delete(repo)
     return next
   }
 

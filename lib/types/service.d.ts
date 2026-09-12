@@ -104,6 +104,12 @@ export declare class RepoBoardService extends Service {
      * task runs once per plan (one DSH session per repo in production).
      * Manual commit policy stops each repo at a submit request (16.1); the
      * same requirement's repos may not overlap another running dispatch (6.1).
+     *
+     * A dispatched requirement re-enters here for a re-dispatch (17.3): repos
+     * that already succeeded stay put (their commits exist), everything else
+     * re-runs with its prior failure history seeded into the retry prompt.
+     * Repos still awaiting a submit decision block the whole re-dispatch -
+     * decide those first.
      */
     dispatchRequirement(record: RequirementRecord, task: RepoTask, options?: {
         concurrency?: number;

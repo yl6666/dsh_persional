@@ -80,4 +80,11 @@ export declare class RequirementRecord {
      * needs-human. Only a dispatched record carries a run to replace.
      */
     updateRun(run: ExecutionRun): RequirementRecord;
+    /**
+     * Return a dispatched requirement to planned for a re-dispatch of its
+     * failed repos (17.3 defect loop): the superseded run moves to the
+     * append-only runHistory so the failure context survives, and the plans
+     * stay attached for the executor to retry against.
+     */
+    reDispatch(): RequirementRecord;
 }

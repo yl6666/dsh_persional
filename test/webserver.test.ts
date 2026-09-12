@@ -154,4 +154,30 @@ describe('repo-board-web routes', () => {
     const missingEdge = await call(server, '/repo-board/edges', 'POST', JSON.stringify({ action: 'confirm', id: 'missing' }))
     expect(missingEdge.status).toBe(422)
   })
+
+  it('a bogus contractKind is rejected at the route and never poisons the persisted graph', async () => {
+    await board.open('demo', graphPath)
+    await board.upsertNode('a', { name: 'a', path: '/a', labels: [] })
+    await board.upsertNode('b', { name: 'b', path: '/b', labels: [] })
+
+    // Before the fix this returned 200, persisted an edge whose kind the
+    // load-time validator rejects, and permanently bricked the graph file.
+    const rejected = await call(server, '/repo-board/edges', 'POST', JSON.stringify({
+      action: 'add-manual-edge', from: 'a', to: 'b', type: 'contract',
+      contractName: 'x', contractKind: 'bogus',
+    }))
+    expect(rejected.status).toBe(422)
+    expect(JSON.parse(rejected.body)).toEqual({ error: expect.stringContaining('contractKind') })
+    // The graph (on disk and in memory) still reopens cleanly.
+    await expect(board.open('demo', graphPath)).resolves.toBeTruthy()
+
+    // A legal kind round-trips: 200, persisted, reopenable.
+    const added = await call(server, '/repo-board/edges', 'POST', JSON.stringify({
+      action: 'add-manual-edge', from: 'a', to: 'b', type: 'contract',
+      contractName: 'x', contractKind: 'rpc',
+    }))
+    expect(added.status).toBe(200)
+    expect((JSON.parse(added.body) as RepoGraphDocument).edges[0]!.contractRef?.kind).toBe('rpc')
+    await expect(board.open('demo', graphPath)).resolves.toBeTruthy()
+  })
 })

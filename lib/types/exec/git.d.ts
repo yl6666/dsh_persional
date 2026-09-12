@@ -48,7 +48,13 @@ export declare class GitClient {
     currentBranch(cwd: string): Promise<string>;
     /** Porcelain status summary (untracked files fully expanded, no dir folding). */
     status(cwd: string): Promise<GitStatus>;
-    /** Files changed vs `base` (or vs HEAD for staged+worktree changes). */
+    /**
+     * Files changed vs `base`; without a base, everything commitAll would
+     * commit: staged, modified, AND untracked. A bare `git diff --name-only
+     * HEAD` silently drops untracked files (on a born HEAD just as much as a
+     * normal one), which once let manual-policy runs whose sessions created
+     * only new files bypass the human submit gate entirely.
+     */
     listChangedFiles(cwd: string, base?: string): Promise<string[]>;
     /** Stage everything and commit with the board identity. Returns the new hash. */
     commitAll(cwd: string, message: string): Promise<string>;

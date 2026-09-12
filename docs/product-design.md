@@ -645,10 +645,28 @@ boot manifest 含 `{"id":"dsh-repo-board"}`、分发的 client bundle 契约正�
 状态词表扩展：`submit-pending` / `submitted`（`RequirementStatus` 仍止于 dispatched，细节在
 `RepoRunState`）；`RequirementRecord.updateRun` 保持不可变链。
 
-- 测试：`pnpm test` → 141 全绿（12 文件；含真实 git 全链路 manual 模式集成测试）。
+### 15.3 对抗性评审两轮修复（架构师审视 + 评审代理）
+
+第一轮（人工架构评审，按 8 条硬不变量逐面核查）修复三个高危：
+
+| 发现 | 根因 | 修复 |
+|---|---|---|
+| auto 模式无分支纪律 | tools.ts 仅 manual 构建 git；prompt 谎称「调度方已切好」且禁止会话自救 → AI 提交可落 main | git 无论策略都传入 executor；非 git 目录跳过纪律且 prompt 不再声称分支；分支纪律与提交门控解耦 |
+| submit-pending 窗口裸奔 | run 结束即释放互斥；approve 不校验当前分支 → 第二个需求的改动可混入 approve 提交 | submit-pending 的仓保持互斥占用直到 approve/reject；approve 前校验 `currentBranch === submitRequest.branch` |
+| 失败重试不可达 | `planned→dispatched` 单向无回退，工具层二次 execute 直接报错 | `reDispatch()` 转移（run 进 append-only `runHistory`）；dispatchRequirement 放行 dispatched 记录——已 settle 的仓不重跑、其余带 `history` 失败历史重试、run 合并 |
+
+第二轮（评审代理独立确认，各附复现）修复三个缺陷：
+
+| 发现 | 后果 | 修复 |
+|---|---|---|
+| POST /edges 接受任意 contractKind | 持久化后 `open()` 永久抛错，图文件砖化 | 路由层 422 词表校验 + store 写入时校验（纵深防御） |
+| `listChangedFiles` 用 `diff HEAD`，漏 untracked | 会话只建新文件时 manual 模式**静默绕过人工提交门控** | 改为 porcelain status（staged+modified+untracked） |
+| 二批澄清整体替换 answers | 已记录回答被抹掉，阻塞闸门重开 | beginClarification 保留幸存问题的旧答案；resolveClarification 改合并 |
+
+- 测试：`pnpm test` → 157 全绿（12 文件；含真实 git 全链路 manual/auto/重派集成测试）。
 - 宿主能力全部**运行时探测**（`ctx.get` / inject 声明）：DSH 宿主齐全时全量注册，裸 cordis 环境降级为纯领域库（`exports["./core"]`）。
 - 待办（§12 剩余决策点）：LLM 语义标注开关、git push 凭据策略。
-- P1 待办（e2e 学习的后半批）：仓库画像（build/test 命令提取进 RepoNode.meta 注入提示词）、工件分文件存储（`<graphDir>/requirements/<id>/`）。
+- P1 待办（评审遗留中危）：`checkout -B` 交叉需求重置语义、auto 模式会话自述无 git 事实核验、stopReason 非 completed 仍可判成功、执行结果落盘窗口；加上仓库画像（build/test 命令注入提示词）、工件分文件存储（`<graphDir>/requirements/<id>/`）。
 
 ---
 

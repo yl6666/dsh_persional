@@ -180,4 +180,6 @@ export interface RequirementDocument {
   readonly analysis?: ImpactAnalysis
   readonly plans?: readonly RepoModificationPlan[]
   readonly run?: ExecutionRun
+  /** Superseded runs, oldest first - preserved when a re-dispatch replaces the run (17.3). */
+  readonly runHistory?: readonly ExecutionRun[]
 }

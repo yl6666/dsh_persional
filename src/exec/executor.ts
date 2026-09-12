@@ -41,7 +41,9 @@ export type RepoTask = (context: RepoTaskContext) => Promise<RepoTaskOutcome>;
  * (16.1); satisfied structurally by GitClient, faked in tests.
  */
 export interface RepoGitGateway {
+  isRepo(cwd: string): Promise<boolean>
   checkoutBranch(cwd: string, branch: string): Promise<void>
+  currentBranch(cwd: string): Promise<string>
   listChangedFiles(cwd: string): Promise<string[]>
   commitAll(cwd: string, message: string): Promise<string>
 }
@@ -60,6 +62,12 @@ export interface ExecutePlansOptions {
   readonly git?: RepoGitGateway
   /** Attempts per repo before giving up (17.3 loop cap); default 1. */
   readonly maxAttempts?: number
+  /**
+   * Failure history per repo from a previous run (re-dispatch, 17.3): seeds
+   * previousErrors so the retry prompt carries what went wrong, and the
+   * attempt counter continues where the previous run stopped.
+   */
+  readonly history?: Readonly<Record<string, readonly string[]>>
 }
 
 /** Effective requirement branch for one plan (6.2 branch rule). */
@@ -141,29 +149,44 @@ export async function executePlans(
     stateByRepo.set(repo, 'running')
     const plan = byRepo.get(repo)!
     const repoPath = options.repoPaths?.[repo]
-    const branch = branchOf(plan, options.branchBase)
+    let branch = branchOf(plan, options.branchBase)
 
     // Branch discipline (6.2): prepare the requirement branch before the
-    // session touches the checkout; protected names never run.
+    // session touches the checkout; protected names never run. Paths that
+    // are not git work trees get no discipline (and no branch claim in the
+    // prompt) - there is no git state to protect or commit to.
     if (options.git !== undefined && repoPath !== undefined) {
-      if (isProtectedBranch(branch)) {
-        stateByRepo.set(repo, 'needs-human')
-        errors.push(repo + ': plan names protected branch ' + branch + ' - refusing to run')
-        blockDependents(repo)
-        return
-      }
+      let isWorkTree = true
       try {
-        await options.git.checkoutBranch(repoPath, branch)
-      } catch (error) {
-        stateByRepo.set(repo, 'needs-human')
-        errors.push(repo + ': branch checkout failed: ' + (error instanceof Error ? error.message : String(error)))
-        blockDependents(repo)
-        return
+        isWorkTree = await options.git.isRepo(repoPath)
+      } catch {
+        isWorkTree = false
+      }
+      if (!isWorkTree) {
+        branch = ''
+      } else {
+        if (isProtectedBranch(branch)) {
+          stateByRepo.set(repo, 'needs-human')
+          errors.push(repo + ': plan names protected branch ' + branch + ' - refusing to run')
+          blockDependents(repo)
+          return
+        }
+        try {
+          await options.git.checkoutBranch(repoPath, branch)
+        } catch (error) {
+          stateByRepo.set(repo, 'needs-human')
+          errors.push(repo + ': branch checkout failed: ' + (error instanceof Error ? error.message : String(error)))
+          blockDependents(repo)
+          return
+        }
       }
     }
 
-    const previousErrors: string[] = []
-    for (let attempt = 1; ; attempt++) {
+    // Re-dispatch (17.3): a repo's failure history from a previous run
+    // seeds the retry context and continues the attempt counter.
+    const seeded = [...(options.history?.[repo] ?? [])]
+    const previousErrors: string[] = [...seeded]
+    for (let attempt = 1 + seeded.length; ; attempt++) {
       let outcome: RepoTaskOutcome
       try {
         outcome = await task({ plan, repoPath, branch, attempt, previousErrors: [...previousErrors] })

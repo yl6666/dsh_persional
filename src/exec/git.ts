@@ -126,17 +126,20 @@ export class GitClient {
     )
   }
 
-  /** Files changed vs `base` (or vs HEAD for staged+worktree changes). */
+  /**
+   * Files changed vs `base`; without a base, everything commitAll would
+   * commit: staged, modified, AND untracked. A bare `git diff --name-only
+   * HEAD` silently drops untracked files (on a born HEAD just as much as a
+   * normal one), which once let manual-policy runs whose sessions created
+   * only new files bypass the human submit gate entirely.
+   */
   async listChangedFiles(cwd: string, base?: string): Promise<string[]> {
-    const result = await this.git(
-      base === undefined ? ['diff', '--name-only', 'HEAD'] : ['diff', '--name-only', base],
-      cwd,
-    )
-    if (result.exitCode === 0) return lines(result.stdout)
-    // Unborn HEAD (a fresh checkout with no commits yet): everything staged,
-    // modified, or untracked counts as changed.
+    if (base !== undefined) {
+      const result = await this.git(['diff', '--name-only', base], cwd)
+      if (result.exitCode === 0) return lines(result.stdout)
+    }
     const status = await this.status(cwd)
-    return [...status.staged, ...status.modified, ...status.untracked]
+    return [...new Set([...status.staged, ...status.modified, ...status.untracked])]
   }
 
   /** Stage everything and commit with the board identity. Returns the new hash. */
